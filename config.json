@@ -1,0 +1,13 @@
+{
+  "api": {
+    "url": "http://127.0.0.1:9097",
+    "secret": "set-your-secret"
+  },
+  "monitor": {
+    "interval_seconds": 2,
+    "conn_snapshot_every": 30,
+    "log_retention_days": 180,
+    "gateway_log_path": "%LOCALAPPDATA%\\traffic_logger\\connection_events.log",
+    "log_dir": "logs"
+  }
+}
