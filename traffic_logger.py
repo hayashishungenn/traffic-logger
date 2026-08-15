@@ -56,6 +56,10 @@ MAX_EVENT_LINE_LEN = 4096
 MAX_EVENT_LINES_PER_READ = 2000
 _OVERLONG = object()              # EventTail 丢弃超长行时的哨兵值
 
+# 本地 HTTP 响应与单字段长度上限 (T-06): 超限按数据源异常处理, 不整体载入内存。
+MAX_RESPONSE_BYTES = 1 << 20      # 单次接口响应上限: 1 MiB
+MAX_PROTOCOL_LEN = 16             # 协议字段长度上限
+
 # 配置数值边界: 拒绝 NaN/无穷/负值/超出合理上限的值 (T-04)。
 MAX_INTERVAL_SECONDS = 86400      # 采样间隔上限: 24 小时
 MAX_SNAP_EVERY = 86400            # 快照周期上限: 24 小时
@@ -388,7 +392,7 @@ def standardize_connection(rec, ts):
 
     protocol = meta.get("network")
     if isinstance(protocol, str) and protocol.strip():
-        protocol = protocol.strip().upper()
+        protocol = protocol.strip().upper()[:MAX_PROTOCOL_LEN]
     else:
         protocol = None
 
@@ -414,7 +418,7 @@ def parse_event_line(line):
     proto = None
     m = re.search(r"\[([A-Za-z0-9_]+)\]", line)
     if m:
-        proto = m.group(1).upper()
+        proto = m.group(1).upper()[:MAX_PROTOCOL_LEN]
 
     target = None
     arrow = re.search(r"-->\s*([^\s\"',]+)", line)
@@ -519,6 +523,15 @@ class Logger:
 
 # ---------------------------------------------------------------- 数据源客户端
 
+class DataLimitError(Exception):
+    """本地输入超过约定上限 (响应过大等); 按数据源异常处理。"""
+
+    def __init__(self, kind, size=None):
+        super().__init__(kind)
+        self.kind = kind
+        self.size = size
+
+
 class GatewayApi:
     """本机回环接口客户端; 只访问配置中校验通过的回环地址。"""
 
@@ -532,7 +545,13 @@ class GatewayApi:
             headers={"Authorization": f"Bearer {self.secret}"})
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
-                return json.loads(r.read().decode("utf-8"))
+                # 限制单次响应大小: 超限抛 DataLimitError, 不把完整响应载入内存。
+                chunk = r.read(MAX_RESPONSE_BYTES + 1)
+                if len(chunk) > MAX_RESPONSE_BYTES:
+                    raise DataLimitError("http_response_too_large", len(chunk))
+                return json.loads(chunk.decode("utf-8"))
+        except DataLimitError:
+            raise
         except urllib.error.HTTPError as e:
             e.close()  # 释放 HTTPError 响应句柄
             return None
@@ -796,7 +815,12 @@ class Monitor:
         把"部分成功"误判为完整成功。源不可用时返回 ok=False。
         """
         ts = now_iso()
-        conns, d_total, u_total = self.api.snapshot()
+        try:
+            conns, d_total, u_total = self.api.snapshot()
+        except DataLimitError as e:
+            # 输入超过上限: 只记录类型与计数, 不写入原始内容 (T-06)。
+            self.logger.app(f"DATA_LIMIT kind={e.kind}")
+            return {"ok": False, "source_ok": False, "limit": e.kind}
         if conns is None:
             if not self.source_down:
                 self.logger.app("SOURCE_UNAVAILABLE source=local_api")

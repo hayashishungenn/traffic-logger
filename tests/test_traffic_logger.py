@@ -385,6 +385,14 @@ class StandardizeTests(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertIsNone(row["protocol"])
 
+    def test_protocol_field_length_capped(self):
+        # 协议字段设置长度上限, 不产生无界字段 (T-06)
+        rec = json.loads(json.dumps(VALID_IPV4))
+        rec["metadata"]["network"] = "A" * 100
+        row, reason = tl.standardize_connection(rec, "t")
+        self.assertIsNone(reason)
+        self.assertEqual(len(row["protocol"]), tl.MAX_PROTOCOL_LEN)
+
     def test_non_object_rejected(self):
         row, reason = tl.standardize_connection(["not", "dict"], "t")
         self.assertIsNone(row)
@@ -879,6 +887,18 @@ class IntegrationTests(unittest.TestCase):
             with open(os.path.join(self.dir, fn), "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
             self.assertNotIn("int-test-secret", content)
+
+    def test_http_response_size_limit(self):
+        # 响应超过上限: 按数据源异常处理, 只记录类型, 不把完整响应载入内存 (T-06)
+        _Handler.source.response = {"downloadTotal": 1000, "uploadTotal": 2000,
+                                    "connections": [VALID_IPV4], "junk": "x" * 10}
+        with mock.patch("traffic_logger.MAX_RESPONSE_BYTES", 64):
+            s = self.mon.step()
+        self.assertFalse(s["ok"])
+        self.assertFalse(s["source_ok"])
+        app = self._load("app.log")
+        self.assertTrue(any("DATA_LIMIT kind=http_response_too_large" in line
+                            for line in app))
 
 
 # ---------------------------------------------------------------- 入口行为 (main)
