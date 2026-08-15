@@ -233,6 +233,42 @@ def _require_dict(obj, field):
     return obj
 
 
+def resolve_loopback_addresses(host, port=1):
+    """解析主机名并确认所有解析结果都是回环地址; 否则抛 ConfigError。
+
+    用于 localhost 等主机名: 在实际连接前解析并确认结果不会把接口指向远程
+    地址。纯数字回环 IP 直接返回, 不做解析。解析失败或含非回环地址一律拒绝。
+    """
+    if not isinstance(host, str) or not host.strip():
+        raise ConfigError("字段: api.url | 问题: 缺少主机地址 | 建议: 使用数字回环地址或 localhost")
+    try:
+        ip = ipaddress.ip_address(host.strip())
+        if ip.is_loopback:
+            return [str(ip)]
+        raise ConfigError(
+            "字段: api.url | 问题: 地址不是本机回环地址 | 建议: 只允许 127.0.0.0/8 或 ::1")
+    except ConfigError:
+        raise
+    except ValueError:
+        pass    # 是主机名, 需要解析确认
+    try:
+        infos = socket.getaddrinfo(host.strip(), port, type=socket.SOCK_STREAM)
+    except OSError:
+        raise ConfigError(
+            f"字段: api.url | 问题: '{host}' 无法解析为回环地址 | 建议: 使用数字回环地址")
+    addresses = []
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_loopback:
+            raise ConfigError(
+                f"字段: api.url | 问题: '{host}' 解析到非回环地址 | 建议: 检查本机 hosts 解析")
+        addresses.append(str(ip))
+    if not addresses:
+        raise ConfigError(
+            f"字段: api.url | 问题: '{host}' 未解析到任何回环地址 | 建议: 使用数字回环地址")
+    return addresses
+
+
 def _validate_loopback_url(value, field):
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"字段: {field} | 问题: 不能为空 | 建议: 填写本机回环地址, 如 http://127.0.0.1:9097")
@@ -266,8 +302,9 @@ def _validate_loopback_url(value, field):
             f"字段: {field} | 问题: 必须显式指定 1-65535 的端口 | 建议: 如 http://127.0.0.1:9097")
     host = u.hostname
     if host == "localhost":
-        # localhost 在本机可能解析为 127.0.0.1 或 ::1, 两者都是本机回环地址;
-        # 不用于任何远程解析, 详见 README "配置" 一节。
+        # localhost 允许保留, 但必须在实际连接前解析并确认解析结果属于回环
+        # 地址, 禁止通过自定义 hosts 解析把接口指向远程地址。
+        resolve_loopback_addresses(host, port)
         return value
     try:
         ip = ipaddress.ip_address(host)
@@ -576,18 +613,19 @@ class GatewayApi:
             return None
 
     def snapshot(self):
-        """返回 (连接列表, 下载累计, 上传累计); 失败或缺少累计量返回 None 元组。"""
+        """返回 (连接列表, 下载累计, 上传累计)。
+
+        只有接口不可访问、响应结构非法或连接列表本身缺失时才返回 None 元组
+        (视为数据源不可用); 聚合总量 downloadTotal/uploadTotal 缺失或非法时
+        原样返回, 由调用方区分 aggregate_valid, 不丢连接明细。
+        """
         data = self.get("/connections")
         if not isinstance(data, dict):
             return None, None, None
         conns = data.get("connections")
         if not isinstance(conns, list):
             return None, None, None
-        d_total = data.get("downloadTotal")
-        u_total = data.get("uploadTotal")
-        if d_total is None or u_total is None:
-            return None, None, None
-        return conns, d_total, u_total
+        return conns, data.get("downloadTotal"), data.get("uploadTotal")
 
 
 class EventTail:

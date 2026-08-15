@@ -138,7 +138,10 @@ class ConfigTests(unittest.TestCase):
 
     def test_loopback_forms_accepted(self):
         for url in ("http://127.0.0.1:9097", "http://localhost:9097", "https://[::1]:9097"):
-            cfg = tl.validate_config(make_config(self.dir, api_url=url))
+            with mock.patch("socket.getaddrinfo",
+                            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                           ("127.0.0.1", 9097))]):
+                cfg = tl.validate_config(make_config(self.dir, api_url=url))
             self.assertEqual(cfg["api_url"], url)
 
     def test_empty_url_rejected(self):
@@ -226,9 +229,28 @@ class ConfigTests(unittest.TestCase):
             self.assertIn("api.url", str(cm.exception))
 
     def test_localhost_url_accepted_and_documented(self):
-        # localhost 只在本机解析为回环地址 (127.0.0.1 / ::1), 不用于任何远程解析
-        cfg = tl.validate_config(make_config(self.dir, api_url="http://localhost:9097"))
+        # localhost 只允许解析到回环地址 (127.0.0.1 / ::1); 禁止远程解析
+        with mock.patch("socket.getaddrinfo",
+                        return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                       ("127.0.0.1", 9097))]):
+            cfg = tl.validate_config(make_config(self.dir, api_url="http://localhost:9097"))
         self.assertEqual(cfg["api_url"], "http://localhost:9097")
+
+    def test_localhost_resolved_to_non_loopback_rejected(self):
+        # 自定义 hosts 解析把 localhost 指向远程地址时, 必须在连接前拒绝 (P2)
+        for resolved in ("8.8.8.8", "203.0.113.9", "2001:db8::9"):
+            with mock.patch("socket.getaddrinfo",
+                            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                           (resolved, 9097))]):
+                with self.assertRaises(tl.ConfigError) as cm:
+                    tl.validate_config(make_config(self.dir, api_url="http://localhost:9097"))
+            self.assertIn("api.url", str(cm.exception))
+
+    def test_localhost_unresolvable_rejected(self):
+        with mock.patch("socket.getaddrinfo", side_effect=socket.gaierror("no such host")):
+            with self.assertRaises(tl.ConfigError) as cm:
+                tl.validate_config(make_config(self.dir, api_url="http://localhost:9097"))
+        self.assertIn("api.url", str(cm.exception))
 
     def test_missing_config_file_fails_load(self):
         with self.assertRaises(OSError):
@@ -570,6 +592,41 @@ class EventTailTests(unittest.TestCase):
         lines = tail.read_new()
         self.assertEqual(lines, ["[TCP] 203.0.113.7:53\n"])
         self.assertEqual(tail.overlong, 1)
+
+    def test_event_line_exactly_over_limit_with_newline_discarded(self):
+        # 正好超过上限且带换行: 必须整行丢弃 (P2)
+        tail = tl.EventTail(self.path, max_lines=10, max_line_len=8)
+        self._write("123456789\n")          # 内容 9 字节 > 8, 带换行
+        self.assertEqual(tail.read_new(), [])
+        self.assertEqual(tail.overlong, 1)
+        self.assertEqual(tail.read_new(), [])   # 游标已越过该行, 不重复
+
+    def test_event_line_over_limit_without_newline_discarded(self):
+        # 超过上限且不带换行 (文件末尾): 必须整行丢弃 (P2)
+        tail = tl.EventTail(self.path, max_lines=10, max_line_len=8)
+        self._write("123456789")            # 内容 9 字节 > 8, 无换行即 EOF
+        self.assertEqual(tail.read_new(), [])
+        self.assertEqual(tail.overlong, 1)
+
+    def test_event_line_at_limit_with_newline_kept(self):
+        # 恰好等于上限 (内容 8) 且带换行: 不视为超长
+        tail = tl.EventTail(self.path, max_lines=10, max_line_len=8)
+        self._write("12345678\n")
+        self.assertEqual(tail.read_new(), ["12345678\n"])
+        self.assertEqual(tail.overlong, 0)
+
+    def test_overlong_line_leaves_no_parseable_residue(self):
+        # 超长行残片不能生成看似合法的 IP/端口事件 (P2)
+        tail = tl.EventTail(self.path, max_lines=10, max_line_len=64)
+        mon_logger = mock.Mock(spec=tl.Logger)
+        mon = tl.Monitor({"interval": 1.0, "snap_every": 30}, mon_logger, None, tail)
+        # 超长行以 IP 开头, 紧随一条合法事件行
+        self._write("203.0.113.10:443" + ("x" * 60) + "\n[TCP] 203.0.113.7:53\n")
+        mon._process_events("t")
+        saved_lines = [c[0][1][0] for c in mon_logger.text.call_args_list]
+        self.assertEqual(len(saved_lines), 1)
+        self.assertIn("203.0.113.7", saved_lines[0])
+        self.assertNotIn("203.0.113.10", saved_lines[0])
 
     def test_event_source_missing_recovered_logged(self):
         tail = tl.EventTail(self.path)
@@ -936,6 +993,49 @@ class IntegrationTests(unittest.TestCase):
         app = self._load("app.log")
         self.assertTrue(any("aggregate downloadTotal invalid" in line for line in app))
 
+    def test_missing_aggregate_keeps_valid_detail(self):
+        # 聚合字段完全缺失: 不得判定为数据源不可用, 明细仍落盘 (P1)
+        with open(os.path.join(self.dir, "no_events.log"), "a",
+                  encoding="utf-8") as f:
+            f.write("[TCP] 203.0.113.98:53\n")
+        _Handler.source.response = {"uploadTotal": 200, "connections": [VALID_IPV4]}
+        s = self.mon.step()
+        self.assertTrue(s["ok"])
+        self.assertTrue(s["source_ok"])          # 不是数据源不可用
+        self.assertTrue(s["detail_written"])
+        self.assertFalse(s["aggregate_valid"])
+
+        detail = self._load(f"connections_detail_{tl.date_str()}.jsonl")
+        self.assertEqual(len(detail), 1)
+        self.assertEqual(json.loads(detail[0])["remote_ip"], "203.0.113.10")
+
+        csv = self._load(f"traffic_{tl.date_str()}.csv")
+        self.assertEqual(csv, [])
+
+        snap = self._load(f"connections_{tl.date_str()}.log")
+        self.assertTrue(any("up_kbs=null down_kbs=null" in line for line in snap))
+
+        events = self._load(f"events_{tl.date_str()}.log")
+        self.assertTrue(any("203.0.113.98" in line for line in events),
+                        "聚合缺失周期仍应处理本地事件")
+
+    def test_both_aggregates_invalid_keeps_detail(self):
+        # 两个聚合字段同时非法/缺失: 明细仍落盘, CSV 不产生错误数据
+        _Handler.source.response = {"downloadTotal": "bad", "uploadTotal": None,
+                                    "connections": [VALID_IPV4]}
+        s = self.mon.step()
+        self.assertTrue(s["ok"])
+        self.assertTrue(s["source_ok"])
+        self.assertTrue(s["detail_written"])
+        self.assertFalse(s["aggregate_valid"])
+
+        detail = self._load(f"connections_detail_{tl.date_str()}.jsonl")
+        self.assertEqual(len(detail), 1)
+        csv = self._load(f"traffic_{tl.date_str()}.csv")
+        self.assertEqual(csv, [])
+        app = self._load("app.log")
+        self.assertTrue(any("aggregate" in line for line in app))
+
     def test_source_unavailable_then_recovered(self):
         src = _Handler.source
         src.response = {"downloadTotal": 100, "uploadTotal": 200, "connections": [VALID_IPV4]}
@@ -971,6 +1071,29 @@ class IntegrationTests(unittest.TestCase):
         app = self._load("app.log")
         self.assertTrue(any("DATA_LIMIT kind=http_response_too_large" in line
                             for line in app))
+
+
+# ---------------------------------------------------------------- 数据源客户端契约
+
+class GatewayApiContractTests(unittest.TestCase):
+    def test_snapshot_missing_totals_returns_conns_not_source_down(self):
+        # 聚合总量缺失时 snapshot() 仍返回连接列表, 由调用方区分 aggregate_valid (P1)
+        api = tl.GatewayApi("http://127.0.0.1:1", "secret")
+        api.get = mock.Mock(return_value={"connections": [VALID_IPV4]})
+        conns, d, u = api.snapshot()
+        self.assertEqual(len(conns), 1)
+        self.assertIsNone(d)
+        self.assertIsNone(u)
+
+    def test_snapshot_connections_missing_means_source_down(self):
+        api = tl.GatewayApi("http://127.0.0.1:1", "secret")
+        api.get = mock.Mock(return_value={"downloadTotal": 1, "uploadTotal": 2})
+        self.assertEqual(api.snapshot(), (None, None, None))
+
+    def test_snapshot_non_dict_response_means_source_down(self):
+        api = tl.GatewayApi("http://127.0.0.1:1", "secret")
+        api.get = mock.Mock(return_value=["not", "a", "dict"])
+        self.assertEqual(api.snapshot(), (None, None, None))
 
 
 # ---------------------------------------------------------------- 入口行为 (main)
