@@ -619,15 +619,38 @@ class Monitor:
             self.last_event_fail_log = time.time()
             self.logger.app(f"INVALID_RECORD event_parse_failures_total={self.event_failures}")
 
+    def _write_snapshot(self, ts, active, valid_rows, up_rate, down_rate, now_t):
+        """写文本快照; 聚合总量无效时速率写明确的 null, 不得写零冒充真实速率。"""
+        if now_t - self.last_snap < self.snap_every:
+            return
+        self.last_snap = now_t
+        top = sorted(valid_rows, key=lambda r: r["up_bytes"] + r["down_bytes"],
+                     reverse=True)[:MAX_SNAPSHOT_LINES]
+        if up_rate is None or down_rate is None:
+            rate_part = "up_kbs=null down_kbs=null"
+        else:
+            rate_part = f"up_kbs={up_rate:.1f} down_kbs={down_rate:.1f}"
+        lines = [f"timestamp={ts} active={active} {rate_part}"]
+        for r in top:
+            proto = r["protocol"] if r["protocol"] else "null"
+            lines.append(f"remote={r['remote_ip']}:{r['remote_port']} "
+                         f"up_bytes={r['up_bytes']} down_bytes={r['down_bytes']} "
+                         f"protocol={proto}")
+        self.logger.text(f"connections_{self.logger.today}.log", lines)
+
     def step(self):
-        """执行一个采样周期, 返回统计字典; 源不可用时返回 ok=False。"""
+        """执行一个采样周期。
+
+        返回字典至少区分: source_ok / detail_written / aggregate_valid, 避免调用方
+        把"部分成功"误判为完整成功。源不可用时返回 ok=False。
+        """
         ts = now_iso()
         conns, d_total, u_total = self.api.snapshot()
         if conns is None:
             if not self.source_down:
                 self.logger.app("SOURCE_UNAVAILABLE source=local_api")
                 self.source_down = True
-            return {"ok": False}
+            return {"ok": False, "source_ok": False}
 
         if self.source_down:
             self.logger.app("SOURCE_RECOVERED source=local_api")
@@ -647,16 +670,25 @@ class Monitor:
             reasons = ",".join(f"{k}={v}" for k, v in sorted(rejects.items()))
             self.logger.app(f"INVALID_RECORD count={invalid_total} reasons={reasons}")
 
-        now_t = time.time()
-        rates = self._update_rates(d_total, u_total, now_t)
-        if rates is None:
-            self.logger.app("INVALID_RECORD aggregate totals invalid, CSV skipped")
-            return {"ok": True, "active": active, "valid": len(valid_rows),
-                    "invalid": invalid_total}
-        up_rate, down_rate = rates
-
-        # JSONL 连接明细: 每个有效连接每次采样一行
+        # 有效连接明细不依赖聚合总量是否有效 (T-02): 先落盘明细。
         self.logger.jsonl_many(f"connections_detail_{self.logger.today}.jsonl", valid_rows)
+        detail_written = bool(valid_rows)
+
+        now_t = time.time()
+        # 聚合总量非法时, 跳过伪造 CSV, 但明细、事件与带 null 速率的快照照常处理。
+        d = to_nonneg_int(d_total)
+        u = to_nonneg_int(u_total)
+        if d is None or u is None:
+            bad = "downloadTotal" if d is None else "uploadTotal"
+            self.logger.app(f"INVALID_RECORD aggregate {bad} invalid, CSV skipped")
+            self._write_snapshot(ts, active, valid_rows, None, None, now_t)
+            self._process_events(ts)
+            return {"ok": True, "source_ok": True, "detail_written": detail_written,
+                    "aggregate_valid": False, "active": active, "valid": len(valid_rows),
+                    "invalid": invalid_total, "up_rate": None, "down_rate": None}
+
+        rates = self._update_rates(d_total, u_total, now_t)
+        up_rate, down_rate = rates
 
         # CSV 周期汇总: 固定表头, 已有文件不重复写表头
         row_text = (f"{ts},{up_rate:.1f},{down_rate:.1f},{active},"
@@ -664,22 +696,13 @@ class Monitor:
         self.logger.csv(f"traffic_{self.logger.today}.csv", CSV_HEADER, row_text)
 
         # 文本快照: 按配置周期, 最多 40 条按总字节数排序的有效连接
-        if now_t - self.last_snap >= self.snap_every:
-            self.last_snap = now_t
-            top = sorted(valid_rows, key=lambda r: r["up_bytes"] + r["down_bytes"],
-                         reverse=True)[:MAX_SNAPSHOT_LINES]
-            lines = [f"timestamp={ts} active={active} up_kbs={up_rate:.1f} down_kbs={down_rate:.1f}"]
-            for r in top:
-                proto = r["protocol"] if r["protocol"] else "null"
-                lines.append(f"remote={r['remote_ip']}:{r['remote_port']} "
-                             f"up_bytes={r['up_bytes']} down_bytes={r['down_bytes']} "
-                             f"protocol={proto}")
-            self.logger.text(f"connections_{self.logger.today}.log", lines)
+        self._write_snapshot(ts, active, valid_rows, up_rate, down_rate, now_t)
 
         # 本地事件增量读取
         self._process_events(ts)
 
-        return {"ok": True, "active": active, "valid": len(valid_rows),
+        return {"ok": True, "source_ok": True, "detail_written": detail_written,
+                "aggregate_valid": True, "active": active, "valid": len(valid_rows),
                 "invalid": invalid_total, "up_rate": up_rate, "down_rate": down_rate}
 
     def run_forever(self):

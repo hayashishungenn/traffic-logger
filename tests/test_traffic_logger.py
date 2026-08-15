@@ -714,6 +714,7 @@ class IntegrationTests(unittest.TestCase):
         s = self.mon.step()
         self.assertEqual(s["up_rate"], 0.0)
         self.assertEqual(s["down_rate"], 0.0)
+        self.assertTrue(s["aggregate_valid"])
         csv = self._load(f"traffic_{tl.date_str()}.csv")
         for row in csv[1:]:
             up, down = row.split(",")[1], row.split(",")[2]
@@ -721,6 +722,44 @@ class IntegrationTests(unittest.TestCase):
             self.assertGreaterEqual(float(down), 0.0)
         app = self._load("app.log")
         self.assertTrue(any("COUNTER_RESET" in line for line in app))
+        # 计数器回退只重设基线, 不删除本周期有效连接明细 (T-02)
+        detail = self._load(f"connections_detail_{tl.date_str()}.jsonl")
+        self.assertGreaterEqual(len(detail), 2)
+
+    def test_invalid_aggregate_keeps_valid_detail(self):
+        # 聚合总量非法时: 明细仍落盘, CSV 不出现伪造累计值, 快照速率为 null,
+        # 本周期事件照常处理, 返回值区分部分成功。
+        with open(os.path.join(self.dir, "no_events.log"), "a",
+                  encoding="utf-8") as f:
+            f.write("[TCP] 203.0.113.99:443\n")
+        src = _Handler.source
+        src.response = {"downloadTotal": "bad", "uploadTotal": 200,
+                        "connections": [VALID_IPV4]}
+        s = self.mon.step()
+        self.assertTrue(s["ok"])
+        self.assertTrue(s["source_ok"])
+        self.assertTrue(s["detail_written"])
+        self.assertFalse(s["aggregate_valid"])
+        self.assertIsNone(s["up_rate"])
+        self.assertIsNone(s["down_rate"])
+
+        detail = self._load(f"connections_detail_{tl.date_str()}.jsonl")
+        self.assertEqual(len(detail), 1)
+        obj = json.loads(detail[0])
+        self.assertEqual(obj["remote_ip"], "203.0.113.10")
+
+        csv = self._load(f"traffic_{tl.date_str()}.csv")
+        self.assertEqual(csv, [])   # 不写入伪造 CSV 累计值/速率
+
+        snap = self._load(f"connections_{tl.date_str()}.log")
+        self.assertTrue(any("up_kbs=null down_kbs=null" in line for line in snap))
+
+        events = self._load(f"events_{tl.date_str()}.log")
+        self.assertTrue(any("203.0.113.99" in line for line in events),
+                        "聚合异常周期仍应处理本地事件")
+
+        app = self._load("app.log")
+        self.assertTrue(any("aggregate downloadTotal invalid" in line for line in app))
 
     def test_source_unavailable_then_recovered(self):
         src = _Handler.source
