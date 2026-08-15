@@ -82,9 +82,12 @@ SAMPLE_CONNECTIONS = [VALID_IPV4, VALID_IPV6, DOMAIN_RECORD, INVALID_PORT_RECORD
 
 
 def make_config(log_dir, api_url="http://127.0.0.1:9097", **overrides):
-    """构造一份合法的配置字典; overrides 覆盖 monitor/api 子键。"""
+    """构造一份合法的配置字典; overrides 覆盖 monitor/api 子键。
+
+    默认 secret 使用非占位测试密钥, 避免 main() 的生产占位符校验拒绝它。
+    """
     cfg = {
-        "api": {"url": api_url, "secret": "set-your-secret"},
+        "api": {"url": api_url, "secret": "test-local-secret-abc"},
         "monitor": {
             "interval_seconds": 1,
             "conn_snapshot_every": 30,
@@ -196,6 +199,36 @@ class ConfigTests(unittest.TestCase):
     def test_interval_override_validated(self):
         with self.assertRaises(tl.ConfigError):
             tl.validate_config(make_config(self.dir), interval_override=0.2)
+
+    def test_empty_secret_rejected(self):
+        for s in ("", "   "):
+            with self.assertRaises(tl.ConfigError) as cm:
+                tl.validate_config(make_config(self.dir, api={"secret": s}))
+            self.assertIn("api.secret", str(cm.exception))
+            self.assertNotIn(repr(s), str(cm.exception))
+
+    def test_non_finite_interval_rejected(self):
+        for bad in (float("nan"), float("inf"), float("-inf"), 86401.0):
+            with self.assertRaises(tl.ConfigError) as cm:
+                tl.validate_config(make_config(self.dir,
+                                               monitor={"interval_seconds": bad}))
+            self.assertIn("interval_seconds", str(cm.exception))
+
+    def test_url_path_userinfo_query_rejected(self):
+        for url in ("http://user:pass@127.0.0.1:9097",
+                    "http://127.0.0.1:9097/connections",
+                    "http://127.0.0.1:9097?q=1",
+                    "http://127.0.0.1:9097#frag",
+                    "http://127.0.0.1:0",
+                    "http://127.0.0.1:99999"):
+            with self.assertRaises(tl.ConfigError) as cm:
+                tl.validate_config(make_config(self.dir, api_url=url))
+            self.assertIn("api.url", str(cm.exception))
+
+    def test_localhost_url_accepted_and_documented(self):
+        # localhost 只在本机解析为回环地址 (127.0.0.1 / ::1), 不用于任何远程解析
+        cfg = tl.validate_config(make_config(self.dir, api_url="http://localhost:9097"))
+        self.assertEqual(cfg["api_url"], "http://localhost:9097")
 
     def test_missing_config_file_fails_load(self):
         with self.assertRaises(OSError):
@@ -874,6 +907,12 @@ class MainTests(unittest.TestCase):
 
     def test_config_error_exit_code_2(self):
         p = self._write_config(api={"url": "http://8.8.8.8:9097"})
+        code = tl.main(["--config", p])
+        self.assertEqual(code, 2)
+
+    def test_placeholder_secret_rejected(self):
+        # validate_config 允许开发占位密钥; 生产启动 (main) 必须拒绝 (T-04)
+        p = self._write_config(api={"secret": "set-your-secret"})
         code = tl.main(["--config", p])
         self.assertEqual(code, 2)
 

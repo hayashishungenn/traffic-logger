@@ -25,6 +25,7 @@ import argparse
 import datetime
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -54,6 +55,15 @@ PORT_MIN, PORT_MAX = 1, 65535
 MAX_EVENT_LINE_LEN = 4096
 MAX_EVENT_LINES_PER_READ = 2000
 _OVERLONG = object()              # EventTail 丢弃超长行时的哨兵值
+
+# 配置数值边界: 拒绝 NaN/无穷/负值/超出合理上限的值 (T-04)。
+MAX_INTERVAL_SECONDS = 86400      # 采样间隔上限: 24 小时
+MAX_SNAP_EVERY = 86400            # 快照周期上限: 24 小时
+MAX_RETENTION_DAYS = 3650         # 保留天数上限: 10 年
+
+# 明确允许的开发占位密钥; validate_config 允许 (开发), main() 生产启动校验拒绝。
+PLACEHOLDER_SECRETS = frozenset({"set-your-secret", "changeme", "your-secret",
+                                 "change-me", "change-me-please", "changeme123"})
 
 # 清理白名单: 只有本程序明确生成的日志/临时文件才允许被 retention 删除。
 # 使用完整文件名匹配, 不允许目录名、前缀或模糊后缀扩大删除范围。
@@ -208,46 +218,78 @@ def _validate_loopback_url(value, field):
         raise ConfigError(f"字段: {field} | 问题: 不能为空 | 建议: 填写本机回环地址, 如 http://127.0.0.1:9097")
     try:
         u = urllib.parse.urlsplit(value)
-        if u.scheme not in ("http", "https"):
-            raise ValueError("scheme")
-        if not u.hostname or not u.port:
-            raise ValueError("port")
-        host = u.hostname
-        if host == "localhost":
-            return value
-        try:
-            ip = ipaddress.ip_address(host)
-        except ValueError:
-            raise ConfigError(
-                f"字段: {field} | 问题: 地址 '{host}' 不是本机回环地址 | 建议: 只允许 127.0.0.0/8 或 ::1")
-        if not ip.is_loopback:
-            raise ConfigError(
-                f"字段: {field} | 问题: 地址 '{host}' 不是本机回环地址 | 建议: 只允许 127.0.0.0/8 或 ::1")
-        return value
-    except ConfigError:
-        raise
-    except Exception:
+    except ValueError:
         raise ConfigError(
-            f"字段: {field} | 问题: 协议仅允许 http/https, 且必须带端口 | 建议: 如 http://127.0.0.1:9097")
+            f"字段: {field} | 问题: URL 无法解析 (协议/端口不合法) | 建议: 如 http://127.0.0.1:9097")
+    if u.scheme not in ("http", "https"):
+        raise ConfigError(
+            f"字段: {field} | 问题: 协议仅允许 http/https | 建议: 如 http://127.0.0.1:9097")
+    if u.username is not None or u.password is not None:
+        raise ConfigError(
+            f"字段: {field} | 问题: 不允许包含用户信息 | 建议: 使用纯回环地址")
+    if u.query or u.fragment:
+        raise ConfigError(
+            f"字段: {field} | 问题: 不允许带查询参数或片段 | 建议: 使用纯回环地址")
+    if u.path not in ("", "/"):
+        raise ConfigError(
+            f"字段: {field} | 问题: 不允许带路径 | 建议: 只填根地址, 如 http://127.0.0.1:9097")
+    if not u.hostname:
+        raise ConfigError(
+            f"字段: {field} | 问题: 缺少主机地址 | 建议: 如 http://127.0.0.1:9097")
+    try:
+        port = u.port
+    except ValueError:
+        raise ConfigError(
+            f"字段: {field} | 问题: 端口必须在 1-65535 | 建议: 如 http://127.0.0.1:9097")
+    if port is None or port < 1:
+        raise ConfigError(
+            f"字段: {field} | 问题: 必须显式指定 1-65535 的端口 | 建议: 如 http://127.0.0.1:9097")
+    host = u.hostname
+    if host == "localhost":
+        # localhost 在本机可能解析为 127.0.0.1 或 ::1, 两者都是本机回环地址;
+        # 不用于任何远程解析, 详见 README "配置" 一节。
+        return value
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        raise ConfigError(
+            f"字段: {field} | 问题: 地址不是本机回环地址 | 建议: 只允许 127.0.0.0/8 或 ::1")
+    if not ip.is_loopback:
+        raise ConfigError(
+            f"字段: {field} | 问题: 地址不是本机回环地址 | 建议: 只允许 127.0.0.0/8 或 ::1")
+    return value
 
 
-def _validate_float(value, field, minimum, default, hint):
+def _validate_float(value, field, minimum, default, hint, maximum=None):
     if value is None:
         value = default
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"字段: {field} | 问题: 必须是数值 | 建议: {hint}")
     value = float(value)
+    if not math.isfinite(value):
+        raise ConfigError(f"字段: {field} | 问题: 必须是有限数值 | 建议: {hint}")
     if value < minimum:
         raise ConfigError(f"字段: {field} | 问题: 不得小于 {minimum} | 建议: {hint}")
+    if maximum is not None and value > maximum:
+        raise ConfigError(
+            f"字段: {field} | 问题: 不得大于 {maximum:g} | 建议: {hint}")
     return value
 
 
-def _validate_positive_int(value, field, default, hint):
+def _validate_positive_int(value, field, default, hint, maximum=None):
     if value is None:
         value = default
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ConfigError(f"字段: {field} | 问题: 必须是大于 0 的整数 | 建议: {hint}")
+    if maximum is not None and value > maximum:
+        raise ConfigError(
+            f"字段: {field} | 问题: 不得大于 {maximum} | 建议: {hint}")
     return value
+
+
+def is_placeholder_secret(s):
+    """开发占位密钥判断; 错误信息不依赖该值本身。"""
+    return isinstance(s, str) and s.strip().lower() in PLACEHOLDER_SECRETS
 
 
 def validate_config(cfg, interval_override=None):
@@ -260,17 +302,18 @@ def validate_config(cfg, interval_override=None):
 
     api_url = _validate_loopback_url(api_cfg.get("url"), "api.url")
     secret = api_cfg.get("secret")
-    if not isinstance(secret, str):
-        raise ConfigError("字段: api.secret | 问题: 必须是字符串 | 建议: 设置为本地接口认证密钥")
+    if not isinstance(secret, str) or not secret.strip():
+        # 错误信息不回显 secret 值, 只提示字段名与修复方向
+        raise ConfigError("字段: api.secret | 问题: 必须是非空字符串 | 建议: 设置为本地接口认证密钥")
 
     interval = _validate_float(mon_cfg.get("interval_seconds"), "monitor.interval_seconds",
-                               1, 2, "建议 2-60, 且不小于 1")
+                               1, 2, "建议 2-60, 且不小于 1", maximum=MAX_INTERVAL_SECONDS)
     snap_every = _validate_positive_int(mon_cfg.get("conn_snapshot_every"),
                                         "monitor.conn_snapshot_every", 30,
-                                        "正整数, 不小于采样间隔")
+                                        "正整数, 不小于采样间隔", maximum=MAX_SNAP_EVERY)
     if interval_override is not None:
         interval = _validate_float(interval_override, "--interval", 1, interval,
-                                   "建议 2-60, 且不小于 1")
+                                   "建议 2-60, 且不小于 1", maximum=MAX_INTERVAL_SECONDS)
     if snap_every < interval:
         raise ConfigError(
             "字段: monitor.conn_snapshot_every | 问题: 不得小于采样间隔 | "
@@ -278,7 +321,8 @@ def validate_config(cfg, interval_override=None):
 
     retention_days = _validate_positive_int(mon_cfg.get("log_retention_days"),
                                             "monitor.log_retention_days", 180,
-                                            "正整数, 按适用制度配置并评估磁盘容量")
+                                            "正整数, 按适用制度配置并评估磁盘容量",
+                                            maximum=MAX_RETENTION_DAYS)
 
     event_path = expand_local_path(mon_cfg.get("gateway_log_path"),
                                    "monitor.gateway_log_path", BASE_DIR)
@@ -291,8 +335,8 @@ def validate_config(cfg, interval_override=None):
         "interval": interval,
         "snap_every": snap_every,
         "retention_days": retention_days,
-        "event_path": expand_path(event_path, BASE_DIR),
-        "log_dir": expand_path(log_dir, BASE_DIR),
+        "event_path": event_path,
+        "log_dir": log_dir,
     }
     return cfg_obj
 
@@ -839,6 +883,14 @@ def main(argv=None):
         return 2
     except ConfigError as e:
         print(f"[traffic-logger] 配置错误: {e}", file=sys.stderr)
+        return 2
+
+    # 生产启动校验: 占位密钥在开发配置中允许, 生产启动必须使用真实密钥。
+    if is_placeholder_secret(cfg["api_secret"]):
+        print("[traffic-logger] 配置错误: api.secret 仍为占位符, 生产启动必须设置真实密钥",
+              file=sys.stderr)
+        print("[traffic-logger] 建议: 修改 config.json 的 api.secret 为实际本地接口认证密钥",
+              file=sys.stderr)
         return 2
 
     lock = SingleInstance()

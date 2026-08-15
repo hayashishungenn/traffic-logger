@@ -26,7 +26,7 @@ traffic_logger/
 1. 安装 Python 3.10+ 并加入 `PATH`。
 2. 编辑 `config.json`:
    - `api.url`: 只允许本机回环地址 (如 `http://127.0.0.1:9097`)。
-   - `api.secret`: 设置为本地数据接口的认证密钥。
+   - `api.secret`: 设置为本地数据接口的认证密钥 (必须是真实密钥, 占位符会在启动时被拒绝)。
 3. 双击 `install.bat`:
    - 检查脚本与 Python 是否可用;
    - 注册计划任务 `traffic_logger_autostart` (登录时后台运行);
@@ -39,15 +39,20 @@ traffic_logger/
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `api.url` | `http://127.0.0.1:9097` | 仅允许本机回环地址 |
-| `api.secret` | `set-your-secret` | 本地接口认证; 不进入任何日志/输出 |
-| `monitor.interval_seconds` | `2` | 采样间隔, 不小于 1 |
-| `monitor.conn_snapshot_every` | `30` | 快照周期, 不小于采样间隔 |
-| `monitor.log_retention_days` | `180` | 日志保留天数; 按适用制度评估磁盘容量 |
+| `api.url` | `http://127.0.0.1:9097` | 仅允许本机回环地址; 不接受用户信息/路径/查询/片段/远程主机 |
+| `api.secret` | `set-your-secret` | 本地接口认证; 必须非空; 不进入任何日志/输出 |
+| `monitor.interval_seconds` | `2` | 采样间隔, 有限数值, 1–86400 秒 |
+| `monitor.conn_snapshot_every` | `30` | 快照周期, 正整数, 不小于采样间隔且 ≤ 86400 |
+| `monitor.log_retention_days` | `180` | 日志保留天数, 正整数, ≤ 3650; 按适用制度评估磁盘容量 |
 | `monitor.gateway_log_path` | `%LOCALAPPDATA%\traffic_logger\connection_events.log` | 本地事件文件 (仅本地路径) |
 | `monitor.log_dir` | `logs` | 日志目录; 清理仅限本程序生成的文件 |
 
-配置错误会在启动前以非零状态退出, 错误信息包含**字段名与修复建议**, 不进入半初始化状态。`log_dir` 与 `gateway_log_path` 只接受本机本地路径 (相对项目目录或本机绝对路径); **拒绝 UNC、网络共享、URL、设备路径和本机保留设备名**。
+配置边界:
+
+- `api.secret` **必须是非空字符串**; `config.json` 默认的 `set-your-secret` 是开发占位符 —— 校验阶段 (开发配置) 允许, 但**生产启动校验会拒绝占位密钥并返回退出码 2**, 请替换为实际本地接口认证密钥后再运行。
+- `api.url` 只接受回环地址; `localhost` 仅在本机解析为 `127.0.0.1` 或 `::1` (两者都是本机回环地址), 不用于任何远程解析。
+- `interval_seconds`、`--interval`、`conn_snapshot_every`、`log_retention_days` 拒绝 `NaN`、正负无穷和超出上限的值。
+- `log_dir` 与 `gateway_log_path` 只接受本机本地路径 (相对项目目录或本机绝对路径); **拒绝 UNC、网络共享、URL、设备路径和本机保留设备名**。
 
 ## 启动 / 停止
 
