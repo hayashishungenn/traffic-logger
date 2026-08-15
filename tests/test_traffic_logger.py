@@ -173,6 +173,26 @@ class ConfigTests(unittest.TestCase):
                                            monitor={"gateway_log_path": "http://x/y"}))
         self.assertIn("gateway_log_path", str(cm.exception))
 
+    def test_unc_event_path_rejected(self):
+        for p in ("\\\\server\\share\\events.log", "\\\\?\\C:\\events.log",
+                  "//remote/share/events.log"):
+            with self.assertRaises(tl.ConfigError) as cm:
+                tl.validate_config(make_config(self.dir,
+                                               monitor={"gateway_log_path": p}))
+            self.assertIn("gateway_log_path", str(cm.exception))
+
+    def test_unc_log_dir_rejected(self):
+        for p in ("\\\\server\\share\\logs", "\\\\?\\C:\\logs", "\\\\.\\C:\\logs",
+                  "//remote/share/logs", "https://example.com/logs"):
+            with self.assertRaises(tl.ConfigError) as cm:
+                tl.validate_config(make_config(self.dir, monitor={"log_dir": p}))
+            self.assertIn("log_dir", str(cm.exception))
+
+    def test_reserved_device_name_log_dir_rejected(self):
+        with self.assertRaises(tl.ConfigError) as cm:
+            tl.validate_config(make_config(self.dir, monitor={"log_dir": "CON"}))
+        self.assertIn("log_dir", str(cm.exception))
+
     def test_interval_override_validated(self):
         with self.assertRaises(tl.ConfigError):
             tl.validate_config(make_config(self.dir), interval_override=0.2)
@@ -476,6 +496,35 @@ class LoggerTests(unittest.TestCase):
         if os.name == "nt":
             self.assertTrue(os.path.exists(ro))   # 只读文件被跳过, 不清除
         os.chmod(ro, 0o666)
+
+    def test_cleanup_preserves_expired_unknown_file(self):
+        # 过期的程序日志被删除; 同目录下过期的未知文件必须保留 (T-01 P0)
+        old = time.time() - 10 * 86400
+        program = os.path.join(self.dir, "traffic_20200101.csv")
+        with open(program, "w", encoding="utf-8") as f:
+            f.write("x\n")
+        os.utime(program, (old, old))
+        for name in ("important.txt", "config.json", "README.md"):
+            p = os.path.join(self.dir, name)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("keep\n")
+            os.utime(p, (old, old))
+        self.logger.cleanup()
+        self.assertFalse(os.path.exists(program), "过期程序日志应被清理")
+        for name in ("important.txt", "config.json", "README.md"):
+            self.assertTrue(os.path.exists(os.path.join(self.dir, name)),
+                            f"未知文件 {name} 不应被清理删除")
+
+    def test_program_filename_whitelist(self):
+        for good in ("app.log", "traffic_20260101.csv", "connections_20260101.log",
+                     "connections_detail_20260101.jsonl", "events_20260101.log",
+                     "traffic_logger_tmp_1.tmp"):
+            self.assertTrue(tl.is_program_log_filename(good), good)
+        for bad in ("important.txt", "config.json", "README.md", "app.txt",
+                    "traffic_202601.csv", "traffic_20260101", "traffic_abc.csv",
+                    "user_data", "connections_detail.log", ".hidden",
+                    "app.log.bak", "traffic_20260101.csv.evil", "logs"):
+            self.assertFalse(tl.is_program_log_filename(bad), bad)
 
     def test_write_failure_raises(self):
         bad = os.path.join(self.dir, "blocked")

@@ -44,10 +44,10 @@ traffic_logger/
 | `monitor.interval_seconds` | `2` | 采样间隔, 不小于 1 |
 | `monitor.conn_snapshot_every` | `30` | 快照周期, 不小于采样间隔 |
 | `monitor.log_retention_days` | `180` | 日志保留天数; 按适用制度评估磁盘容量 |
-| `monitor.gateway_log_path` | `%LOCALAPPDATA%\traffic_logger\connection_events.log` | 本地事件文件 (本地路径) |
-| `monitor.log_dir` | `logs` | 日志目录; 清理仅限该目录 |
+| `monitor.gateway_log_path` | `%LOCALAPPDATA%\traffic_logger\connection_events.log` | 本地事件文件 (仅本地路径) |
+| `monitor.log_dir` | `logs` | 日志目录; 清理仅限本程序生成的文件 |
 
-配置错误会在启动前以非零状态退出, 错误信息包含**字段名与修复建议**, 不进入半初始化状态。
+配置错误会在启动前以非零状态退出, 错误信息包含**字段名与修复建议**, 不进入半初始化状态。`log_dir` 与 `gateway_log_path` 只接受本机本地路径 (相对项目目录或本机绝对路径); **拒绝 UNC、网络共享、URL、设备路径和本机保留设备名**。
 
 ## 启动 / 停止
 
@@ -85,7 +85,7 @@ JSONL 明细字段:
 - `remote_ip` 只接受通过标准库校验的 IPv4/IPv6 字面量; **域名或无法确认的文本一律不进入明细**, 只计入无效计数。
 - `up_bytes` / `down_bytes` 为非负整数; 计数器回退时重新建立基线, 不输出负速率。
 - CSV 固定表头 `timestamp,upload_kbs,download_kbs,active_connections,valid_connections,invalid_connections,total_upload_bytes,total_download_bytes`, 已有文件不重复写表头。
-- 文件名含本地日期, 跨日自动切换; 超过保留期的文件由程序在日志目录内自动清理。
+- 文件名含本地日期, 跨日自动切换; 超过保留期的文件由程序自动清理, **只删除本程序生成的文件名模式** (`app.log`、`traffic_YYYYMMDD.csv`、`connections_YYYYMMDD.log`、`connections_detail_YYYYMMDD.jsonl`、`events_YYYYMMDD.log` 及程序临时文件), 同目录下的其他文件、子目录内容一律保留, 清理不跟随子目录。
 
 ## 卸载
 

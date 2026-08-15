@@ -50,6 +50,17 @@ EVENT_FAIL_LOG_INTERVAL = 60.0    # 事件解析失败限频 (秒)
 RETRY_SLEEP = 5.0                 # 接口失败时的重试间隔 (秒)
 PORT_MIN, PORT_MAX = 1, 65535
 
+# 清理白名单: 只有本程序明确生成的日志/临时文件才允许被 retention 删除。
+# 使用完整文件名匹配, 不允许目录名、前缀或模糊后缀扩大删除范围。
+_PROGRAM_FILE_PATTERNS = (
+    re.compile(r"^app\.log$"),
+    re.compile(r"^traffic_\d{8}\.csv$"),
+    re.compile(r"^connections_\d{8}\.log$"),
+    re.compile(r"^connections_detail_\d{8}\.jsonl$"),
+    re.compile(r"^events_\d{8}\.log$"),
+    re.compile(r"^traffic_logger_[\w.\-]+\.tmp$"),   # 程序预留的临时文件模式
+)
+
 
 # ---------------------------------------------------------------- 基础工具
 
@@ -73,6 +84,61 @@ def expand_path(p, base):
     p = os.path.expandvars(str(p))
     if not os.path.isabs(p):
         p = os.path.join(base, p)
+    return p
+
+
+def is_program_log_filename(name):
+    """仅当文件名精确匹配本程序生成的文件模式时才返回 True。
+
+    完整匹配, 不允许通过目录名、前缀或模糊后缀扩大删除范围。
+    """
+    if not isinstance(name, str):
+        return False
+    return any(p.match(name) for p in _PROGRAM_FILE_PATTERNS)
+
+
+_RESERVED_DEVICE_NAMES = frozenset(
+    "CON PRN AUX NUL".split()
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)])
+
+
+def _is_remote_or_device_path(path):
+    """判断解析后的路径是否指向网络位置或设备路径 (UNC 前缀 / URI / 设备前缀)。"""
+    p = path.replace("/", "\\")
+    if p.startswith("\\\\"):
+        return True   # UNC 共享 / 反斜杠设备路径 / 扩展长度路径
+    if "://" in p:
+        return True   # 残留 URI
+    return False
+
+
+def validate_local_path(value, field):
+    """校验本地路径: 非空字符串, 且不是 URL/UNC/设备路径; 失败抛 ConfigError。"""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"字段: {field} | 问题: 不能为空 | 建议: 填写本地路径")
+    v = value.strip()
+    if "://" in v:
+        raise ConfigError(
+            f"字段: {field} | 问题: 只允许本地路径 | 建议: 不接受 URL 或网络位置")
+    if _is_remote_or_device_path(v):
+        raise ConfigError(
+            f"字段: {field} | 问题: 拒绝网络路径/设备路径 | 建议: 填写本机本地路径")
+    base_name = os.path.basename(v.rstrip("\\/"))
+    if base_name.upper() in _RESERVED_DEVICE_NAMES:
+        raise ConfigError(
+            f"字段: {field} | 问题: 文件名 '{base_name}' 是本机保留设备名 | 建议: 更换文件名")
+    return v
+
+
+def expand_local_path(value, field, base):
+    """校验并展开本地路径; 展开后的绝对位置必须仍在本机, 不允许指向远程位置。"""
+    v = validate_local_path(value, field)
+    p = expand_path(v, base)
+    ap = os.path.abspath(p)
+    if _is_remote_or_device_path(ap):
+        raise ConfigError(
+            f"字段: {field} | 问题: 路径解析后指向网络/设备位置 | 建议: 填写本机本地路径")
     return p
 
 
@@ -209,15 +275,10 @@ def validate_config(cfg, interval_override=None):
                                             "monitor.log_retention_days", 180,
                                             "正整数, 按适用制度配置并评估磁盘容量")
 
-    event_path = mon_cfg.get("gateway_log_path")
-    if not isinstance(event_path, str) or not event_path.strip():
-        raise ConfigError("字段: monitor.gateway_log_path | 问题: 不能为空 | 建议: 填写本地事件文件路径")
-    if "://" in event_path:
-        raise ConfigError("字段: monitor.gateway_log_path | 问题: 只允许本地路径 | 建议: 填写本地文件路径")
+    event_path = expand_local_path(mon_cfg.get("gateway_log_path"),
+                                   "monitor.gateway_log_path", BASE_DIR)
 
-    log_dir = mon_cfg.get("log_dir")
-    if not isinstance(log_dir, str) or not log_dir.strip():
-        raise ConfigError("字段: monitor.log_dir | 问题: 不能为空 | 建议: 填写日志目录, 默认 logs")
+    log_dir = expand_local_path(mon_cfg.get("log_dir"), "monitor.log_dir", BASE_DIR)
 
     cfg_obj = {
         "api_url": api_url,
@@ -383,19 +444,25 @@ class Logger:
             return
         cutoff = time.time() - self.retention_days * 86400
         removed = 0
+        skipped = 0
         for fn in os.listdir(self.log_dir):
+            # 只处理本程序明确生成的日志/临时文件, 不越权删除其他文件。
+            if not is_program_log_filename(fn):
+                skipped += 1
+                continue
             fp = os.path.join(self.log_dir, fn)
             try:
                 if os.path.isfile(fp) and os.path.getmtime(fp) < cutoff:
                     os.remove(fp)
                     removed += 1
+                else:
+                    skipped += 1
             except OSError:
-                continue  # 只读或占用文件跳过, 不阻断
-        if removed:
-            try:
-                self.app(f"CLEANUP removed={removed} days={self.retention_days}")
-            except OSError:
-                pass
+                skipped += 1  # 只读或占用文件跳过, 不阻断采集
+        try:
+            self.app(f"CLEANUP removed={removed} skipped={skipped} days={self.retention_days}")
+        except OSError:
+            pass
 
     def close(self):
         """无常驻句柄, 无需额外释放; 保留以兼容显式调用。"""
