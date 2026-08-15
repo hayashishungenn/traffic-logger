@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-traffic-logger 本地连接元数据监控 (v1.1.0-dev)
+traffic-logger 本地连接元数据监控 (v1.2.0-dev)
 
 范围:
   - 以固定采样间隔记录本机连接的累计上下行字节与速率
@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 
-VERSION = "1.1.0-dev"
+VERSION = "1.2.0-dev"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG = os.path.join(BASE_DIR, "config.json")
