@@ -110,6 +110,8 @@ class WindowsScriptFileTests(unittest.TestCase):
         self.assertIn("TL_STOP_SCRIPT", un)
         self.assertIn("[IO.Path]::GetFullPath", un)     # 规范化路径
         self.assertIn("python(w)?\\.exe", un)           # 只匹配 python/pythonw
+        self.assertIn("(?<!", un)                        # 词边界: 不匹配前缀碰撞
+        self.assertIn("(?!", un)
         self.assertIn("ERROR_NOT_STOPPED", un)          # 未停止时非零
         self.assertNotIn("Get-Process | Stop-Process", un)  # 拒绝模糊进程匹配
 
@@ -117,6 +119,16 @@ class WindowsScriptFileTests(unittest.TestCase):
         for name in ("install.bat", "uninstall.bat"):
             self.assertIn("%~dp0", _read_script(name))
             self.assertIn("traffic_logger.py", _read_script(name))
+
+    def test_scripts_ascii_and_crlf(self):
+        # 批处理必须只用 ASCII 且 CRLF 换行, 不依赖终端默认编码 (P1)
+        for name in ("install.bat", "uninstall.bat"):
+            with open(os.path.join(BASE_DIR, name), "rb") as f:
+                raw = f.read()
+            raw.decode("ascii")                     # 非 ASCII 字节即抛 UnicodeDecodeError
+            self.assertNotIn(b"\n", raw.replace(b"\r\n", b""),
+                             f"{name} 必须使用 CRLF 换行")
+            self.assertGreaterEqual(len(raw), 100)
 
 
 @unittest.skipUnless(_probe_schtasks(), "本机无法创建计划任务 (schtasks 不可用或无权限)")
@@ -215,6 +227,32 @@ class WindowsScriptStopTests(unittest.TestCase):
         self.assertIn("STOPPED_OK", r.stdout + r.stderr)
         self.proc.wait(timeout=15)
         self.assertIsNotNone(self.proc.poll(), "进程应已被停止")
+
+    def test_stop_logic_ignores_prefix_collision(self):
+        # 精确匹配: 命令行含 traffic_logger.py.bak 的进程不得被误停 (P1)
+        bak = os.path.join(self.project, "traffic_logger.py.bak")
+        with open(bak, "w", encoding="utf-8") as f:
+            f.write(self.STUB)
+        proc = subprocess.Popen([sys.executable, bak], cwd=self.project,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            time.sleep(1.0)
+            self.assertIsNone(proc.poll(), ".bak 测试进程应仍在运行")
+            env = dict(os.environ)
+            env["TL_STOP_SCRIPT"] = os.path.join(self.project, "traffic_logger.py")
+            stop_bat = os.path.join(self.base, "stop_step.bat")
+            with open(stop_bat, "w", encoding="utf-8") as f:
+                f.write("@echo off\n" + _extract_stop_line() + "\n")
+            r = subprocess.run(["cmd", "/c", stop_bat], cwd=self.base, env=env,
+                               capture_output=True, text=True, timeout=120)
+            self.assertIn("STOPPED_OK", r.stdout + r.stderr)
+            self.assertIsNone(proc.poll(), ".bak 进程不应被误停")
+            # setUp 启动的 .py 实例应被停止
+            self.proc.wait(timeout=15)
+            self.assertIsNotNone(self.proc.poll(), ".py 实例应被停止")
+        finally:
+            proc.kill()
+            proc.wait()
 
 
 if __name__ == "__main__":
