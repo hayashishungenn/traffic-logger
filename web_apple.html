@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>traffic-logger 流量看板</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+/* ===== Apple HIG Design System (科技蓝系 · Web) ===== */
+:root{
+  --apple-blue:#007AFF; --apple-blue-dark:#0A84FF;
+  --green:#34C759; --green-dark:#30D158;
+  --indigo:#5856D6; --teal:#5AC8FA; --red:#FF3B30; --orange:#FF9500;
+  --font-system:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Helvetica Neue','PingFang SC','Microsoft YaHei',sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+/* Light mode tokens */
+:root, html[data-theme="light"]{
+  --bg-primary:#F5F5F7; --bg-secondary:#FFFFFF; --bg-tertiary:#FFFFFF;
+  --label-primary:rgba(0,0,0,0.85); --label-secondary:rgba(60,60,67,0.6); --label-tertiary:rgba(60,60,67,0.3);
+  --separator:rgba(60,60,67,0.12); --fill:rgba(120,120,128,0.08);
+  --glass-bg:rgba(255,255,255,0.72); --glass-border:rgba(255,255,255,0.4);
+  --shadow-sm:0 1px 3px rgba(0,0,0,0.06); --shadow-md:0 4px 16px rgba(0,0,0,0.08); --shadow-lg:0 12px 40px rgba(0,0,0,0.12);
+  --page-bg:#EDEDF0; --card-border:rgba(0,0,0,0.06);
+  --up-color:#FF3B30; --down-color:#007AFF;
+}
+/* Dark mode tokens */
+html[data-theme="dark"]{
+  --bg-primary:#000000; --bg-secondary:#1C1C1E; --bg-tertiary:#2C2C2E;
+  --label-primary:rgba(255,255,255,0.92); --label-secondary:rgba(235,235,245,0.6); --label-tertiary:rgba(235,235,245,0.3);
+  --separator:rgba(84,84,88,0.5); --fill:rgba(120,120,128,0.18);
+  --glass-bg:rgba(28,28,30,0.72); --glass-border:rgba(255,255,255,0.12);
+  --shadow-sm:0 1px 3px rgba(0,0,0,0.4); --shadow-md:0 4px 16px rgba(0,0,0,0.5); --shadow-lg:0 12px 40px rgba(0,0,0,0.6);
+  --page-bg:#0D0D0F; --card-border:rgba(255,255,255,0.08);
+  --up-color:#FF453A; --down-color:#0A84FF;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:var(--page-bg); color:var(--label-primary);
+  font-family:var(--font-system); -webkit-font-smoothing:antialiased;
+  min-height:100vh; transition:background .3s ease,color .3s ease;
+}
+/* ===== Glassmorphism nav bar (full-width bg, constrained content) ===== */
+.nav{
+  position:sticky;top:0;z-index:100;width:100%;
+  background:var(--glass-bg);
+  backdrop-filter:saturate(180%) blur(24px);
+  -webkit-backdrop-filter:saturate(180%) blur(24px);
+  border-bottom:0.5px solid var(--separator);
+}
+.nav__inner{
+  max-width:1440px;margin:0 auto;padding:0 32px;height:56px;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.brand{display:flex;align-items:center;gap:10px}
+.brand .icon{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--apple-blue),var(--indigo));color:#fff;font-weight:600;font-size:13px;box-shadow:var(--shadow-md)}
+.brand h1{font-size:16px;font-weight:600;letter-spacing:-0.2px}
+.brand .ver{font-size:11px;color:var(--label-tertiary);font-weight:400;margin-left:2px}
+.status{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--label-secondary)}
+.pulse{width:8px;height:8px;border-radius:50%;background:var(--green-dark);box-shadow:0 0 0 rgba(48,209,88,.4);animation:pluse 2s infinite}
+.pulse.err{background:var(--red);box-shadow:0 0 0 rgba(255,69,58,.4)}
+@keyframes pluse{0%{box-shadow:0 0 0 0 rgba(48,209,88,.35)}70%{box-shadow:0 0 0 8px rgba(48,209,88,0)}100%{box-shadow:0 0 0 0 rgba(48,209,88,0)}}
+.theme-toggle{
+  border:0.5px solid var(--separator);background:var(--fill);color:var(--label-secondary);
+  width:34px;height:34px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:transform .3s cubic-bezier(.34,1.56,.64,1),background .2s;
+}
+.theme-toggle:hover{transform:scale(1.1)}
+.theme-toggle:active{transform:scale(.92)}
+.theme-toggle svg{width:16px;height:16px;fill:var(--label-secondary)}
+/* ===== Content ===== */
+.wrap{max-width:1440px;margin:0 auto;padding:24px 32px 40px}
+/* KPI cards */
+.kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:16px}
+.kpi{
+  background:var(--bg-secondary);border:0.5px solid var(--card-border);border-radius:16px;
+  padding:20px 22px;position:relative;overflow:hidden;box-shadow:var(--shadow-sm);
+  transition:transform .3s cubic-bezier(.34,1.56,.64,1),box-shadow .3s;
+}
+.kpi:hover{transform:translateY(-2px);box-shadow:var(--shadow-md)}
+.kpi::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:0 3px 3px 0}
+.kpi.up::before{background:var(--up-color)} .kpi.down::before{background:var(--down-color)}
+.kpi.conn::before{background:var(--indigo)} .kpi.total::before{background:var(--green-dark)}
+.kpi .lbl{font-size:12px;color:var(--label-secondary);font-weight:500;margin-bottom:6px;letter-spacing:.2px}
+.kpi .val{font-size:34px;font-weight:600;letter-spacing:-1px;font-variant-numeric:tabular-nums;line-height:1.1}
+.kpi .val small{font-size:13px;color:var(--label-tertiary);font-weight:400;margin-left:2px;letter-spacing:0}
+.kpi .sub{font-size:12px;color:var(--label-tertiary);margin-top:6px}
+/* Charts */
+.chart-row{display:grid;grid-template-columns:1.6fr 1fr;gap:16px;margin-bottom:16px}
+.chart-row2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.chart-row3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:16px}
+@media(max-width:1100px){.chart-row,.chart-row2,.chart-row3{grid-template-columns:1fr}}
+.card{
+  background:var(--bg-secondary);border:0.5px solid var(--card-border);border-radius:16px;
+  padding:20px;box-shadow:var(--shadow-sm);
+}
+.card .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.card .hd h3{font-size:14px;font-weight:600;letter-spacing:-0.2px}
+.card .hd .note{font-size:12px;color:var(--label-tertiary)}
+.chart{width:100%;height:280px}
+/* Range segmented control (iOS style) */
+.seg{display:flex;gap:2px;background:var(--fill);border-radius:9px;padding:2px}
+.seg button{
+  border:none;background:transparent;color:var(--label-secondary);font-size:12px;font-weight:500;
+  padding:5px 14px;border-radius:7px;cursor:pointer;transition:all .25s cubic-bezier(.34,1.56,.64,1);font-family:var(--font-system);
+}
+.seg button.active{background:var(--bg-tertiary);color:var(--apple-blue-dark);box-shadow:var(--shadow-sm);font-weight:600}
+.seg button:hover:not(.active){color:var(--label-primary)}
+/* Table */
+.tbl{max-height:420px;overflow:auto;border-radius:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{
+  position:sticky;top:0;background:var(--bg-secondary);color:var(--label-secondary);font-weight:500;
+  text-align:left;padding:10px 14px;border-bottom:0.5px solid var(--separator);z-index:2;font-size:12px;
+}
+tbody td{padding:10px 14px;border-bottom:0.5px solid var(--separator);font-variant-numeric:tabular-nums}
+tbody tr{transition:background .15s}
+tbody tr:hover{background:var(--fill)}
+.mono{font-family:var(--font-mono);font-size:12px}
+.up-t{color:var(--up-color)} .down-t{color:var(--down-color)}
+.badge{display:inline-block;padding:2px 9px;border-radius:6px;font-size:11px;background:var(--fill);color:var(--label-secondary);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
+.badge.direct{color:var(--green-dark);background:rgba(48,209,88,.12)}
+.badge.proxy{color:var(--orange);background:rgba(255,159,10,.12)}
+.foot{text-align:center;color:var(--label-tertiary);font-size:12px;padding:20px 0 4px}
+/* Scrollbar */
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:var(--fill);border-radius:4px}
+::-webkit-scrollbar-track{background:transparent}
+@media (prefers-reduced-motion:reduce){*{transition-duration:.01ms !important;animation-duration:.01ms !important}}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav__inner">
+    <div class="brand">
+      <div class="icon">TL</div>
+      <h1>traffic-logger <span class="ver">v2</span></h1>
+    </div>
+    <div class="status"><span class="pulse" id="pulse"></span><span id="statusTxt">连接中…</span></div>
+    <button class="theme-toggle" id="themeBtn" title="切换深/浅色">
+      <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18 7 7 0 010-14 9 9 0 000-4z"/></svg>
+    </button>
+  </div>
+</nav>
+
+<div class="wrap">
+  <div class="kpi-row">
+    <div class="kpi up"><div class="lbl">实时上传</div><div class="val" id="kUp">—<small>KB/s</small></div><div class="sub" id="sUp">等待数据</div></div>
+    <div class="kpi down"><div class="lbl">实时下载</div><div class="val" id="kDown">—<small>KB/s</small></div><div class="sub" id="sDown">等待数据</div></div>
+    <div class="kpi conn"><div class="lbl">活跃连接</div><div class="val" id="kConn">—</div><div class="sub" id="sConn">—</div></div>
+    <div class="kpi total"><div class="lbl">累计上传</div><div class="val" id="kTot">—<small>MB</small></div><div class="sub" id="sTot">下载 —</div></div>
+  </div>
+
+  <div class="chart-row">
+    <div class="card"><div class="hd"><h3>实时速率</h3><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:flex-end"><span class="note" id="liveNote">实时 60 秒</span><div class="seg" id="liveSeg"><button data-r="live" class="active">实时</button><button data-r="30m">30 分钟</button><button data-r="1h">1 小时</button><button data-r="24h">24 小时</button></div></div></div><div id="cLive" class="chart"></div></div>
+    <div class="card"><div class="hd"><h3>连接 TOP 10</h3><span class="note">按总流量</span></div><div id="cConn" class="chart"></div></div>
+  </div>
+
+  <div class="chart-row3">
+    <div class="card"><div class="hd"><h3>TOP 域名</h3><span class="note" id="domNote">—</span></div><div id="cDom" class="chart"></div></div>
+    <div class="card"><div class="hd"><h3>TOP 节点</h3><span class="note" id="nodeNote">—</span></div><div id="cNode" class="chart"></div></div>
+    <div class="card"><div class="hd"><h3>TOP 地区</h3><span class="note" id="geoNote">—</span></div><div id="cGeo" class="chart"></div></div>
+  </div>
+
+  <div class="chart-row2">
+    <div class="card" style="grid-column:1/-1">
+      <div class="hd">
+        <h3>历史趋势</h3>
+        <div class="seg" id="seg">
+          <button data-r="30m">30 分钟</button>
+          <button data-r="1h" class="active">1 小时</button>
+          <button data-r="24h">24 小时</button>
+          <button data-r="today">今日</button>
+        </div>
+      </div>
+      <div id="cHist" class="chart"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="hd"><h3>活跃连接明细</h3><span class="note" id="connNote">—</span></div>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>#</th><th>目标</th><th>端口</th><th>协议</th><th>上传</th><th>下载</th><th>规则</th><th>出口</th></tr></thead>
+        <tbody id="connBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="foot">traffic-logger · Apple HIG 风格 · 每 2 秒刷新</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const fmtB=b=>{if(b>=1048576)return (b/1048576).toFixed(1)+' MB';if(b>=1024)return (b/1024).toFixed(1)+' KB';return b+' B'};
+const fmtR=kb=>{if(kb>=1024)return (kb/1024).toFixed(2)+' MB/s';return kb.toFixed(1)+' KB/s'};
+let hist=[];
+let liveRange='live';
+const LIVE_NOTES={live:'实时 60 秒','30m':'30 分钟','1h':'1 小时','24h':'24 小时'};
+function setLiveNote(){const n=$('liveNote');if(n)n.textContent=LIVE_NOTES[liveRange]||liveRange}
+
+/* ---- theme (persist + toggle) ---- */
+const root=document.documentElement;
+const saved=localStorage.getItem('tl-theme');
+if(saved==='light'||saved==='dark')root.setAttribute('data-theme',saved);
+$('themeBtn').onclick=()=>{
+  const cur=root.getAttribute('data-theme')==='dark'?'light':'dark';
+  root.setAttribute('data-theme',cur);localStorage.setItem('tl-theme',cur);
+};
+
+/* ---- chart factory (Apple-flavored) ---- */
+const axis={axisLine:{lineStyle:{color:'#2C2C2E'}},axisLabel:{color:'rgba(235,235,245,0.6)',fontSize:11},splitLine:{lineStyle:{color:'rgba(120,120,128,0.18)'}}};
+function mk(id,opt){const c=echarts.init($(id));c.setOption(opt);return c}
+const TOOL={backgroundColor:'#2C2C2E',borderColor:'#2C2C2E',borderWidth:0.5,textStyle:{color:'rgba(255,255,255,0.92)',fontSize:12},extraCssText:'box-shadow:0 4px 16px rgba(0,0,0,0.5);border-radius:10px'};
+const LEG={textStyle:{color:'rgba(235,235,245,0.6)',fontSize:11}};
+
+const cLive=mk('cLive',{
+  tooltip:{trigger:'axis',...TOOL},legend:{...LEG,data:['上传','下载'],top:0},
+  grid:{left:48,right:12,top:30,bottom:24},
+  xAxis:{type:'time',...axis},yAxis:{type:'value',name:'KB/s',...axis,nameTextStyle:{color:'rgba(235,235,245,0.3)'}},
+  dataZoom:[{type:'inside'}],
+  series:[
+    {name:'上传',type:'line',showSymbol:false,smooth:.35,lineStyle:{width:2,color:'#FF453A'},itemStyle:{color:'#FF453A'},areaStyle:{opacity:.08,color:'#FF453A'}},
+    {name:'下载',type:'line',showSymbol:false,smooth:.35,lineStyle:{width:2,color:'#0A84FF'},itemStyle:{color:'#0A84FF'},areaStyle:{opacity:.08,color:'#0A84FF'}}
+  ]
+});
+const cConn=mk('cConn',{
+  tooltip:{trigger:'axis',axisPointer:{type:'shadow'},...TOOL},legend:{...LEG,data:['上传','下载'],top:0},
+  grid:{left:118,right:12,top:30,bottom:24},
+  xAxis:{type:'value',...axis},yAxis:{type:'category',inverse:true,axisLabel:{color:'rgba(235,235,245,0.6)',fontSize:10,width:100,overflow:'truncate'},...axis,splitLine:{show:false}},
+  series:[
+    {name:'上传',type:'bar',barWidth:6,itemStyle:{color:'#FF453A',borderRadius:[0,3,3,0]}},
+    {name:'下载',type:'bar',barWidth:6,itemStyle:{color:'#0A84FF',borderRadius:[0,3,3,0]}}
+  ]
+});
+/* TOP 横向条形图工厂 (Apple 配色: 域名紫 / 节点青 / 地区橙) */
+function mkTop(id,color){
+  const c=mk(id,{
+    tooltip:{trigger:'axis',axisPointer:{type:'shadow'},...TOOL},
+    grid:{left:8,right:72,top:8,bottom:8,containLabel:true},
+    xAxis:{type:'value',...axis,axisLabel:{show:false},splitLine:{show:false}},
+    yAxis:{type:'category',inverse:true,axisLabel:{color:'rgba(235,235,245,0.6)',fontSize:10,width:118,overflow:'truncate'},...axis,splitLine:{show:false}},
+    series:[{name:'流量',type:'bar',barWidth:8,itemStyle:{color,borderRadius:[0,4,4,0]},label:{show:true,position:'right',color:'rgba(235,235,245,0.3)',fontSize:10,formatter:p=>fmtB(p.value)}}]
+  });
+  return c;
+}
+const cDom=mkTop('cDom','#5E5CE6');
+const cNode=mkTop('cNode','#64D2FF');
+const cGeo=mkTop('cGeo','#FF9F0A');
+const cHist=mk('cHist',{
+  tooltip:{trigger:'axis',...TOOL},legend:{...LEG,data:['上传','下载'],top:0},
+  grid:{left:48,right:12,top:30,bottom:42},
+  xAxis:{type:'category',...axis,axisLabel:{color:'rgba(235,235,245,0.3)',fontSize:10}},yAxis:{type:'value',name:'KB/s',...axis,nameTextStyle:{color:'rgba(235,235,245,0.3)'}},
+  dataZoom:[{type:'inside'},{type:'slider',height:18,bottom:8,borderColor:'#2C2C2E',backgroundColor:'rgba(120,120,128,0.18)',fillerColor:'rgba(10,132,255,.15)',textStyle:{color:'rgba(235,235,245,0.3)'}}],
+  series:[
+    {name:'上传',type:'line',showSymbol:false,lineStyle:{width:1.5,color:'#FF453A'},itemStyle:{color:'#FF453A'},areaStyle:{opacity:.06,color:'#FF453A'}},
+    {name:'下载',type:'line',showSymbol:false,lineStyle:{width:1.5,color:'#0A84FF'},itemStyle:{color:'#0A84FF'},areaStyle:{opacity:.06,color:'#0A84FF'}}
+  ]
+});
+
+function setSt(ok,txt){$('pulse').className='pulse'+(ok?'':' err');$('statusTxt').textContent=txt}
+
+/* ---- animated number (Neko Master style: 0.45s ease-out) ---- */
+const animState={};
+function setNum(id,val,fmt,suffix){
+  const el=$(id);
+  const ease=t=>1-Math.pow(1-t,3);
+  const cur=animState[id]??{from:0,to:0,start:0,dur:450};
+  animState[id]={from:cur.to,to:val,start:performance.now(),dur:450};
+  const tick=now=>{
+    const s=animState[id];if(!s)return;
+    const p=Math.min(1,(now-s.start)/s.dur);
+    const v=s.from+(s.to-s.from)*ease(p);
+    el.innerHTML=fmt(v)+(suffix||'');
+    if(p<1)requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+async function live(){
+  try{
+    const d=await(await fetch('/api/live')).json();
+    setSt(true,'在线 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false}));
+    setNum('kUp',d.up_kbs,v=>v>=1024?(v/1024).toFixed(2)+'<small> MB/s</small>':v.toFixed(1)+'<small> KB/s</small>');
+    setNum('kDown',d.down_kbs,v=>v>=1024?(v/1024).toFixed(2)+'<small> MB/s</small>':v.toFixed(1)+'<small> KB/s</small>');
+    setNum('kConn',d.active,v=>Math.round(v)+'');
+    setNum('kTot',d.total_up/1048576,v=>v.toFixed(1)+'<small> MB</small>');
+    $('sTot').textContent='下载 '+fmtB(d.total_down);
+    const t=Date.now();
+    if(liveRange==='live'){hist.push([t,d.up_kbs,d.down_kbs]);if(hist.length>60)hist.shift();
+      cLive.setOption({series:[{data:hist.map(x=>[x[0],x[1]])},{data:hist.map(x=>[x[0],x[2]])}]});}
+    const top=d.conns.slice(0,10);
+    cConn.setOption({yAxis:{data:top.map(c=>c.host.length>22?c.host.slice(0,21)+'…':c.host)},series:[{data:top.map(c=>c.up)},{data:top.map(c=>c.down)}]});
+    /* TOP 域名 / 节点 / 地区 三列 */
+    const topDom=d.domains||[],topNode=d.nodes||[],topGeo=d.countries||[];
+    $('domNote').textContent=topDom.length?('按流量 · '+topDom.length):'暂无数据';
+    cDom.setOption({yAxis:{data:topDom.map(x=>x.name)},series:[{data:topDom.map(x=>x.up+x.down)}]});
+    $('nodeNote').textContent=topNode.length?('按流量 · '+topNode.length):'暂无数据';
+    cNode.setOption({yAxis:{data:topNode.map(x=>x.name)},series:[{data:topNode.map(x=>x.up+x.down)}]});
+    if(!d.active){$('geoNote').textContent='暂无连接';cGeo.setOption({yAxis:{data:[]},series:[{data:[]}]});}
+    else if(topGeo.length){$('geoNote').textContent='ip-api 反查 · '+topGeo.length;$('geoNote').style.color='';cGeo.setOption({yAxis:{data:topGeo.map(x=>x.name)},series:[{data:topGeo.map(x=>x.up+x.down)}]});}
+    else{$('geoNote').textContent='暂不可用';cGeo.setOption({yAxis:{data:[]},series:[{data:[]}]});}
+    $('connNote').textContent=d.active+' 条连接';
+    $('connBody').innerHTML=top.map((c,i)=>`<tr>
+      <td style="color:var(--label-tertiary)">${i+1}</td>
+      <td class="mono">${c.host}</td><td>${c.port}</td><td>${c.type||'TCP'}</td>
+      <td class="up-t">${fmtB(c.up)}</td><td class="down-t">${fmtB(c.down)}</td>
+      <td><span class="badge ${c.rule==='DIRECT'?'direct':'proxy'}">${(c.rule||'-').slice(0,22)}</span></td>
+      <td><span class="badge">${(c.node||'-').slice(0,16)}</span></td>
+    </tr>`).join('')||'<tr><td colspan="8" style="text-align:center;color:var(--label-tertiary);padding:24px">暂无连接</td></tr>';
+  }catch(e){setSt(false,'数据源不可用')}
+}
+let range='1h';
+async function histL(){
+  try{
+    const d=await(await fetch('/api/history?range='+range)).json();
+    cHist.setOption({xAxis:{data:d.map(r=>{const p=r.t.split('T');return p.length>1?p[1].slice(0,5):r.t.slice(11,16)})},series:[{data:d.map(r=>r.up)},{data:d.map(r=>r.down)}]});
+  }catch(e){}
+}
+document.querySelectorAll('#seg button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#seg button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');range=b.dataset.r;histL();
+});
+/* ---- 实时速率图：live 模式走 hist 缓冲，历史模式走 /api/history（每 15 秒轮询） ---- */
+async function liveHistL(){
+  if(liveRange==='live')return;
+  try{
+    const d=await(await fetch('/api/history?range='+liveRange)).json();
+    const ts=r=>typeof r.t==='number'?r.t:(Date.parse(r.t)||0);
+    cLive.setOption({series:[{data:d.map(r=>[ts(r),r.up])},{data:d.map(r=>[ts(r),r.down])}]});
+  }catch(e){}
+}
+document.querySelectorAll('#liveSeg button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#liveSeg button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');liveRange=b.dataset.r;hist=[];
+  setLiveNote();
+  if(liveRange==='live')live();else liveHistL();
+});
+live();histL();setLiveNote();setInterval(live,2000);setInterval(histL,15000);setInterval(liveHistL,15000);
+window.addEventListener('resize',()=>{cLive.resize();cConn.resize();cHist.resize();cDom.resize();cNode.resize();cGeo.resize()});
+</script>
+</body>
+</html>

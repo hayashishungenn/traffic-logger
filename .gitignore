@@ -20,3 +20,5 @@ env/
 .env.*
 *.secret
 *.token
+config.local.json
+*.local.json
