@@ -748,15 +748,47 @@ class LoggerTests(unittest.TestCase):
                             f"未知文件 {name} 不应被清理删除")
 
     def test_program_filename_whitelist(self):
-        for good in ("app.log", "traffic_20260101.csv", "connections_20260101.log",
+        for good in ("app.log", "app_20260815_161530_123456.log",
+                     "traffic_20260101.csv", "connections_20260101.log",
                      "connections_detail_20260101.jsonl", "events_20260101.log",
                      "traffic_logger_tmp_1.tmp"):
             self.assertTrue(tl.is_program_log_filename(good), good)
         for bad in ("important.txt", "config.json", "README.md", "app.txt",
                     "traffic_202601.csv", "traffic_20260101", "traffic_abc.csv",
                     "user_data", "connections_detail.log", ".hidden",
-                    "app.log.bak", "traffic_20260101.csv.evil", "logs"):
+                    "app.log.bak", "app_20260101.log", "traffic_20260101.csv.evil",
+                    "logs"):
             self.assertFalse(tl.is_program_log_filename(bad), bad)
+
+    def test_app_log_rotates_when_large(self):
+        # app.log 超过阈值时轮转, 避免无界增长 (P2)
+        with mock.patch("traffic_logger.MAX_APP_LOG_BYTES", 100):
+            for i in range(60):
+                self.logger.app(f"event {i}")
+        app_path = os.path.join(self.dir, "app.log")
+        self.assertLess(os.path.getsize(app_path), 400)   # 当前 app.log 保持小体积
+        rotated = [fn for fn in os.listdir(self.dir)
+                   if tl.is_program_log_filename(fn) and fn != "app.log"]
+        self.assertTrue(rotated, "应生成轮转后的 app 日志文件")
+        # 轮转后的旧日志仍可被识别为程序文件
+        self.assertTrue(all(tl.is_program_log_filename(fn) for fn in rotated))
+
+    def test_app_log_rotation_records_marker(self):
+        with mock.patch("traffic_logger.MAX_APP_LOG_BYTES", 50):
+            for i in range(30):
+                self.logger.app(f"marker {i}")
+        with open(os.path.join(self.dir, "app.log"), encoding="utf-8") as f:
+            app_now = f.read()
+        self.assertIn("APP_LOG_ROTATED old=app_", app_now)
+
+    def test_cleanup_removes_expired_rotated_app_log(self):
+        old = time.time() - 10 * 86400
+        rotated = os.path.join(self.dir, "app_20200101_000000_000000.log")
+        with open(rotated, "w", encoding="utf-8") as f:
+            f.write("old\n")
+        os.utime(rotated, (old, old))
+        self.logger.cleanup()
+        self.assertFalse(os.path.exists(rotated), "过期的轮转 app 日志应被清理")
 
     def test_write_failure_raises(self):
         bad = os.path.join(self.dir, "blocked")

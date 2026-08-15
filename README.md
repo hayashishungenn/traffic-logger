@@ -81,7 +81,7 @@ python traffic_logger.py --interval 5
 | `traffic_YYYYMMDD.csv` | 周期汇总 (速率/连接数/有效与无效数/累计量) |
 | `connections_YYYYMMDD.log` | 人工可读快照, 最多 40 条按字节数排序的有效连接 |
 | `events_YYYYMMDD.log` | 本地事件文件增量读取, 仅 `ts / protocol / remote_ip / remote_port` |
-| `app.log` | 程序状态: 启动/停止/重复实例/源不可达与恢复/无效记录/计数器回退/写盘失败/轮转/清理/未捕获异常 |
+| `app.log` | 程序状态: 启动/停止/重复实例/源不可达与恢复/无效记录/计数器回退/写盘失败/轮转/清理/未捕获异常。按大小轮转: 超过 5 MiB 时改名 `app_YYYYMMDD_HHMMSS_mmm.log`, 重新开始, 轮转文件同样受保留期清理 |
 
 JSONL 明细字段:
 
@@ -96,7 +96,7 @@ JSONL 明细字段:
 - `up_bytes` / `down_bytes` 为非负整数; 计数器回退时重新建立基线, 不输出负速率。
 - CSV 固定表头 `timestamp,upload_kbs,download_kbs,active_connections,valid_connections,invalid_connections,total_upload_bytes,total_download_bytes`, 已有文件不重复写表头。
 - **部分数据源异常**: 聚合总量 `downloadTotal`/`uploadTotal` **缺失或非法**时, 该周期**仍会标准化并写入有效连接 JSONL 明细并处理本地事件** (不会误判为数据源不可用), 但不会写伪造的 CSV 累计值/速率, 快照中的速率显示为 `up_kbs=null down_kbs=null`, 并在 `app.log` 记录 `INVALID_RECORD aggregate ... invalid`; 计数器回退只重建速率基线, 不删除当周期明细。只有连接列表本身缺失或接口不可访问时才判定为数据源不可用。
-- 文件名含本地日期, 跨日自动切换; 超过保留期的文件由程序自动清理, **只删除本程序生成的文件名模式** (`app.log`、`traffic_YYYYMMDD.csv`、`connections_YYYYMMDD.log`、`connections_detail_YYYYMMDD.jsonl`、`events_YYYYMMDD.log` 及程序临时文件), 同目录下的其他文件、子目录内容一律保留, 清理不跟随子目录。
+- 文件名含本地日期, 跨日自动切换; 超过保留期的文件由程序自动清理, **只删除本程序生成的文件名模式** (`app.log`、`app_YYYYMMDD_HHMMSS_mmm.log`、`traffic_YYYYMMDD.csv`、`connections_YYYYMMDD.log`、`connections_detail_YYYYMMDD.jsonl`、`events_YYYYMMDD.log` 及程序临时文件), 同目录下的其他文件、子目录内容一律保留, 清理不跟随子目录。
 
 ## 卸载
 

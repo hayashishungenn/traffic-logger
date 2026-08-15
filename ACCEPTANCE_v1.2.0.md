@@ -7,7 +7,7 @@
 
 | 命令 | 结果 | 说明 |
 |---|---|---|
-| `python -m unittest discover -s tests` | PASS | **113** 个测试通过, **2** 个跳过 (schtasks 无权限, 见 §4) |
+| `python -m unittest discover -s tests` | PASS | **116** 个测试通过, **2** 个跳过 (schtasks 无权限, 见 §4) |
 | `python -m py_compile traffic_logger.py tests/test_traffic_logger.py tests/test_windows_scripts.py` | PASS | 无语法错误, 无 `SyntaxWarning` |
 | `python -m json.tool config.json` | PASS | 配置为合法 JSON |
 | `python traffic_logger.py --help` | PASS | 正常输出帮助 |
@@ -33,6 +33,7 @@
 | **P1 脚本加固 (本轮)** | `test_scripts_ascii_and_crlf`、`test_stop_logic_ignores_prefix_collision` | PASS: 脚本仅 ASCII+CRLF (不依赖终端编码); 只停止精确匹配项目脚本路径的实例, 不误停 `.py.bak` 前缀进程 |
 | **P2 事件长度边界 (本轮)** | `test_event_line_exactly_over_limit_with_newline_discarded`、`test_event_line_over_limit_without_newline_discarded`、`test_overlong_line_leaves_no_parseable_residue` | PASS: 超限行 (带/不带换行) 整行丢弃计数, 残片不产生看似有效的 IP/端口 |
 | **P2 localhost 边界 (本轮)** | `test_localhost_resolved_to_non_loopback_rejected`、`test_localhost_unresolvable_rejected`、`test_localhost_url_accepted_and_documented` | PASS: localhost 必须解析到回环地址, 解析到远程地址或无法解析时启动拒绝 |
+| **P2 app.log 轮转 (本轮)** | `test_app_log_rotates_when_large`、`test_app_log_rotation_records_marker`、`test_cleanup_removes_expired_rotated_app_log` | PASS: app.log 超过 5 MiB 自动改名 `app_YYYYMMDD_HHMMSS_mmm.log` 重新开始, 轮转文件并入清理白名单, 过期可清理, 消除无界增长 |
 
 ## 3. 数据源契约口径 (本轮, 与代码一致)
 
@@ -72,6 +73,6 @@ python traffic_logger.py --config <授权配置>
 
 - 本轮全部 P1 修复 (聚合缺失明细保留、脚本编码与精确停止) 与 P2 加固 (事件长度
   边界、localhost 回环解析) 已完成并有回归测试。
-- 当前测试总数 **113** (此前任务书中的 "66 个测试" 已不是当前总数, 以本记录为准)。
+- 当前测试总数 **116** (此前任务书中的 "66 个测试" 已不是当前总数, 以本记录为准)。
 - 真实数据源 60 秒人工验收与计划任务完整回读**未完成**, 阻塞原因如上, 未伪造完成。
 - 结论: **NOT READY** (最高未解决项: 真实数据源人工验收)。

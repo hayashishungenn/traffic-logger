@@ -56,6 +56,10 @@ MAX_EVENT_LINE_LEN = 4096
 MAX_EVENT_LINES_PER_READ = 2000
 _OVERLONG = object()              # EventTail 丢弃超长行时的哨兵值
 
+# app.log 轮转阈值: 达到该大小即改名 app_YYYYMMDD_HHMMSS.log 并重新开始。
+# 否则 app.log 因每次事件都刷新 mtime, 永不满足按 mtime 的保留期清理而无界增长。
+MAX_APP_LOG_BYTES = 5 * 1024 * 1024   # 5 MiB
+
 # 本地 HTTP 响应与单字段长度上限 (T-06): 超限按数据源异常处理, 不整体载入内存。
 MAX_RESPONSE_BYTES = 1 << 20      # 单次接口响应上限: 1 MiB
 MAX_PROTOCOL_LEN = 16             # 协议字段长度上限
@@ -73,6 +77,7 @@ PLACEHOLDER_SECRETS = frozenset({"set-your-secret", "changeme", "your-secret",
 # 使用完整文件名匹配, 不允许目录名、前缀或模糊后缀扩大删除范围。
 _PROGRAM_FILE_PATTERNS = (
     re.compile(r"^app\.log$"),
+    re.compile(r"^app_\d{8}_\d{6}_\d{6}\.log$"),   # 按大小轮转后的 app 日志 (含微秒)
     re.compile(r"^traffic_\d{8}\.csv$"),
     re.compile(r"^connections_\d{8}\.log$"),
     re.compile(r"^connections_detail_\d{8}\.jsonl$"),
@@ -543,8 +548,30 @@ class Logger:
         if lines:
             self.write_lines(name, lines)
 
+    def _rotate_app_log_if_needed(self):
+        """app.log 超过阈值时改名 app_YYYYMMDD_HHMMSS.log 并重新开始。
+
+        返回轮转后的旧文件名; 无需轮转或轮转失败 (只读/占用) 时返回 None。
+        轮转失败不影响本次写入。
+        """
+        path = os.path.join(self.log_dir, "app.log")
+        try:
+            if not (os.path.isfile(path) and os.path.getsize(path) > MAX_APP_LOG_BYTES):
+                return None
+            rotated = "app_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f") + ".log"
+            os.replace(path, os.path.join(self.log_dir, rotated))
+            return rotated
+        except OSError:
+            return None
+
     def app(self, msg):
-        self.write_lines("app.log", [f"[{now()}] {msg}"])
+        rotated = self._rotate_app_log_if_needed()
+        ts = now()
+        lines = []
+        if rotated:
+            lines.append(f"[{ts}] APP_LOG_ROTATED old={rotated}")
+        lines.append(f"[{ts}] {msg}")
+        self.write_lines("app.log", lines)
 
     def cleanup(self):
         if not os.path.isdir(self.log_dir):
