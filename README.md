@@ -28,10 +28,13 @@ traffic_logger/
    - `api.url`: 只允许本机回环地址 (如 `http://127.0.0.1:9097`)。
    - `api.secret`: 设置为本地数据接口的认证密钥 (必须是真实密钥, 占位符会在启动时被拒绝)。
 3. 双击 `install.bat`:
-   - 检查脚本与 Python 是否可用;
+   - 检查脚本与 Python 是否可用 (优先 `pythonw.exe`, 回退 `python.exe`, 均不可用时返回非零码);
    - 注册计划任务 `traffic_logger_autostart` (登录时后台运行);
+   - 创建后用 `schtasks /Query` 回读任务名、命令与触发条件;
    - 失败时返回非零退出码。
    - 如需自定义 Python, 先执行 `set PYTHONW=<pythonw 完整路径>`。
+   - 脚本默认不暂停 (适合自动化); 交互式查看请运行 `install.bat interactive`。
+   - 任务名可用环境变量 `TL_TASK_NAME` 覆盖 (多实例/测试用, 不影响其他计划任务)。
 
 > 安装脚本使用项目相对路径 (`%~dp0`), 不依赖开发机绝对路径; 移动整个目录后重新执行安装即可。
 
@@ -95,11 +98,13 @@ JSONL 明细字段:
 
 ## 卸载
 
-运行 `uninstall.bat`:
+运行 `uninstall.bat` (交互式查看请运行 `uninstall.bat interactive`):
 
-1. 仅停止命令行包含本项目脚本路径的进程;
-2. 删除本项目计划任务 `traffic_logger_autostart`;
+1. **仅停止**命令行中精确包含"规范化后的本项目脚本路径"的 `python`/`pythonw` 进程 (不按模糊字符串终止无关进程); 停止后回读进程是否仍存在, 未停止时返回非零码并保留日志;
+2. 删除本项目计划任务 `traffic_logger_autostart` (任务名同样受 `TL_TASK_NAME` 覆盖);
 3. **默认保留** `logs/` 目录, 如需删除请手动清理。
+
+脚本路径包含空格、括号、中文或 `&` 时仍可正常执行。
 
 ## 测试
 
