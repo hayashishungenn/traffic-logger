@@ -255,7 +255,7 @@ class IpTests(unittest.TestCase):
 
     def test_domain_rejected(self):
         self.assertFalse(tl.is_valid_ip("example.com"))
-        self.assertFalse(tl.is_valid_ip("copilot.tencent.com"))
+        self.assertFalse(tl.is_valid_ip("example.net"))
 
     def test_empty_and_none_rejected(self):
         self.assertFalse(tl.is_valid_ip(""))
