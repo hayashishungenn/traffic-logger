@@ -1,12 +1,21 @@
+# --- Python 运行时缓存 ---
 __pycache__/
 *.py[cod]
+.pytest_cache/
+
+# --- 本程序运行时输出 (不得提交) ---
 logs/
 *.log
 *.csv
 *.jsonl
+*.tmp
+
+# --- 虚拟环境 / 依赖 ---
 .venv/
 venv/
 env/
+
+# --- 密钥与本机配置 (不得提交) ---
 .env
 .env.*
 *.secret
