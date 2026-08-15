@@ -868,6 +868,20 @@ class Monitor:
 
 # ---------------------------------------------------------------- 入口
 
+def _safe_app_log(path, msg):
+    """在不创建、不修改日志目录的前提下尝试追加程序日志; 失败静默。
+
+    用于重复实例提示等场景, 避免为了写一条提示日志而创建/破坏日志目录。
+    """
+    try:
+        d = os.path.dirname(path)
+        if d and os.path.isdir(d):
+            with open(path, "a", encoding="utf-8", newline="\n") as f:
+                f.write(f"[{now()}] {msg}\n")
+    except OSError:
+        pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="traffic-logger 本地连接元数据监控")
     ap.add_argument("--config", default=DEFAULT_CONFIG)
@@ -895,26 +909,30 @@ def main(argv=None):
 
     lock = SingleInstance()
     if not lock:
+        # 重复实例: 只写提示日志, 不创建/锁定/破坏日志目录。
         print("[traffic-logger] INSTANCE_EXISTS 已有实例在运行, 本实例退出")
-        try:
-            tmp = Logger(cfg["log_dir"], cfg["retention_days"])
-            tmp.app("INSTANCE_EXISTS second instance refused")
-            tmp.close()
-        except OSError:
-            pass
-        lock.close()
+        _safe_app_log(os.path.join(cfg["log_dir"], "app.log"),
+                      "INSTANCE_EXISTS second instance refused")
         return 0
 
-    logger = Logger(cfg["log_dir"], cfg["retention_days"])
-    api = GatewayApi(cfg["api_url"], cfg["api_secret"])
-    events = EventTail(cfg["event_path"])
-    mon = Monitor(cfg, logger, api, events)
+    # 统一生命周期: 日志器/数据源/事件读取器/监控器初始化失败都返回非零码。
+    try:
+        logger = Logger(cfg["log_dir"], cfg["retention_days"])
+        api = GatewayApi(cfg["api_url"], cfg["api_secret"])
+        events = EventTail(cfg["event_path"])
+        mon = Monitor(cfg, logger, api, events)
+    except OSError as e:
+        print(f"[traffic-logger] INIT_ERROR 初始化失败: {type(e).__name__}", file=sys.stderr)
+        print("[traffic-logger] 建议: 检查 monitor.log_dir 是否可访问且为目录", file=sys.stderr)
+        lock.close()
+        return 1
 
     try:
         logger.app(f"STARTED interval={cfg['interval']:g}s snap_every={cfg['snap_every']:g}s "
                    f"retention_days={cfg['retention_days']} source=local_api")
         print(f"[traffic-logger] v{VERSION} started (interval={cfg['interval']:g}s)")
         mon.run_forever()
+        logger.app("STOPPED normal exit")
         return 0
     except KeyboardInterrupt:
         logger.app("STOPPED user interrupt")

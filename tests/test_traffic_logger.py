@@ -916,6 +916,22 @@ class MainTests(unittest.TestCase):
         code = tl.main(["--config", p])
         self.assertEqual(code, 2)
 
+    def test_main_returns_one_when_log_dir_is_file(self):
+        # 日志目录指向普通文件: main() 返回 1, 不抛出未处理 FileExistsError (T-05)
+        blocker = os.path.join(self.dir, "blocker")
+        with open(blocker, "w", encoding="utf-8") as f:
+            f.write("x")
+        cfg = make_config(self.dir)
+        cfg["monitor"]["log_dir"] = blocker
+        cfg["monitor"]["gateway_log_path"] = os.path.join(self.dir, "evt.log")
+        p = os.path.join(self.dir, "config.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+        code = tl.main(["--config", p])
+        self.assertEqual(code, 1)
+        # 初始化失败不创建任何业务日志/不写伪造数据
+        self.assertEqual(os.listdir(self.dir), ["blocker", "config.json"])
+
     def test_missing_config_exit_code_2(self):
         code = tl.main(["--config", os.path.join(self.dir, "missing.json")])
         self.assertEqual(code, 2)
