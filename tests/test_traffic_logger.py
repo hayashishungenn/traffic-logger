@@ -415,6 +415,68 @@ class EventTailTests(unittest.TestCase):
         tail = tl.EventTail(os.path.join(self.dir, "missing.log"))
         self.assertEqual(tail.read_new(), [])
 
+    def test_same_size_event_replacement_resets_cursor(self):
+        # 同大小文件替换: 内容不同但字节数相同, 必须识别并从头重读 (T-03)
+        self._write("AAAAA\nBBBBB\n")
+        tail = tl.EventTail(self.path)
+        self.assertEqual(tail.read_new(), ["AAAAA\n", "BBBBB\n"])
+        tmp = self.path + ".new"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("CCCCC\nDDDDD\n")
+        os.replace(tmp, self.path)          # 替换为同大小新文件
+        self.assertEqual(tail.read_new(), ["CCCCC\n", "DDDDD\n"])
+        self.assertEqual(tail.reset_reason, "replaced")
+        self.assertEqual(tail.read_new(), [])   # 不重复
+
+    def test_missing_then_recovered_reads_from_zero(self):
+        tail = tl.EventTail(self.path)
+        self._write("AAAAA\n")
+        self.assertEqual(tail.read_new(), ["AAAAA\n"])
+        os.remove(self.path)
+        self.assertEqual(tail.read_new(), [])
+        self.assertTrue(tail.missing)
+        self._write("BBBBB\n")
+        self.assertEqual(tail.read_new(), ["BBBBB\n"])   # 恢复后从头读取
+        self.assertFalse(tail.missing)
+
+    def test_event_read_limit_counts(self):
+        # 积压超过单次行数上限: 分次读取, 有明确计数且不丢行、不吞首字符
+        self._write("l1\nl2\nl3\n")
+        tail = tl.EventTail(self.path, max_lines=2, max_line_len=100)
+        self.assertEqual(tail.read_new(), ["l1\n", "l2\n"])
+        self.assertTrue(tail.truncated)
+        self.assertEqual(tail.truncated_total, 1)
+        self.assertEqual(tail.read_new(), ["l3\n"])
+        self.assertFalse(tail.truncated)
+        self.assertEqual(tail.truncated_total, 1)
+
+    def test_event_overlong_line_discarded_and_counted(self):
+        # 超长行整行丢弃并计数, 不产生截断后看似有效的字段, 后续行正常读取
+        tail = tl.EventTail(self.path, max_lines=10, max_line_len=64)
+        self._write("X" * 100 + "\n[TCP] 203.0.113.7:53\n")
+        lines = tail.read_new()
+        self.assertEqual(lines, ["[TCP] 203.0.113.7:53\n"])
+        self.assertEqual(tail.overlong, 1)
+
+    def test_event_source_missing_recovered_logged(self):
+        tail = tl.EventTail(self.path)
+        mon_logger = mock.Mock(spec=tl.Logger)
+        mon = tl.Monitor({"interval": 1.0, "snap_every": 30}, mon_logger, None, tail)
+        self._write("[TCP] 203.0.113.11:443\n")
+        mon._process_events("t")
+        self.assertFalse(any("EVENT_SOURCE_MISSING" in c[0][0]
+                             for c in mon_logger.app.call_args_list))
+        os.remove(self.path)
+        mon._process_events("t")
+        self.assertTrue(any("EVENT_SOURCE_MISSING" in c[0][0]
+                            for c in mon_logger.app.call_args_list))
+        self._write("[TCP] 203.0.113.12:443\n")
+        mon._process_events("t")
+        self.assertTrue(any("EVENT_SOURCE_RECOVERED" in c[0][0]
+                            for c in mon_logger.app.call_args_list))
+        saved_lines = [c[0][1][0] for c in mon_logger.text.call_args_list]
+        self.assertTrue(any("203.0.113.12" in ln for ln in saved_lines))
+
     def test_bad_lines_not_saved(self):
         tail = tl.EventTail(self.path)
         mon_logger = mock.Mock(spec=tl.Logger)

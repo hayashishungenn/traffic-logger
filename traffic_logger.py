@@ -50,6 +50,11 @@ EVENT_FAIL_LOG_INTERVAL = 60.0    # 事件解析失败限频 (秒)
 RETRY_SLEEP = 5.0                 # 接口失败时的重试间隔 (秒)
 PORT_MIN, PORT_MAX = 1, 65535
 
+# 事件文件单次读取上限: 单行最大长度与单次最大行数, 避免无限积压一次读入内存。
+MAX_EVENT_LINE_LEN = 4096
+MAX_EVENT_LINES_PER_READ = 2000
+_OVERLONG = object()              # EventTail 丢弃超长行时的哨兵值
+
 # 清理白名单: 只有本程序明确生成的日志/临时文件才允许被 retention 删除。
 # 使用完整文件名匹配, 不允许目录名、前缀或模糊后缀扩大删除范围。
 _PROGRAM_FILE_PATTERNS = (
@@ -506,26 +511,90 @@ class GatewayApi:
 
 
 class EventTail:
-    """本地事件文件偏移游标增量读取; 截断/轮转时重置游标。"""
+    """本地事件文件偏移游标增量读取。
 
-    def __init__(self, path):
+    通过 (st_dev, st_ino, st_mtime_ns) 记录文件身份: 文件被替换、轮转、截断、
+    同大小重写时都能识别并从头读取; 单次读取设行数/行长上限, 游标只在成功
+    读取后推进。
+    """
+
+    def __init__(self, path, max_lines=MAX_EVENT_LINES_PER_READ,
+                 max_line_len=MAX_EVENT_LINE_LEN):
         self.path = path
+        self.max_lines = max_lines
+        self.max_line_len = max_line_len
         self.seen = 0
+        self._identity = None       # 最近一次成功读取时的文件身份
+        self.missing = False        # 文件当前是否缺失
+        self.reset_reason = None    # 本次 read_new 是否因轮转/替换/截断重置
+        self.truncated = False      # 本次读取是否达到行数上限
+        self.truncated_total = 0    # 累计达到行数上限次数
+        self.overlong = 0           # 累计超长行数
+
+    def _readline_bounded(self, f):
+        """读取一行; 超过行长上限时丢弃整行并计数, 不产生截断后看似有效的字段。"""
+        line = f.readline(self.max_line_len + 1)
+        if not line:
+            return None
+        if len(line) > self.max_line_len and not line.endswith("\n"):
+            self.overlong += 1
+            while line and not line.endswith("\n"):
+                line = f.readline(self.max_line_len + 1)
+            return _OVERLONG
+        return line
 
     def read_new(self):
+        self.reset_reason = None
+        self.truncated = False
         try:
-            size = os.path.getsize(self.path)
+            st = os.stat(self.path)
         except OSError:
-            return []  # 文件不存在视为无新事件
-        if size < self.seen:
-            self.seen = 0  # 轮转或截断
+            self.seen = 0
+            self._identity = None
+            self.missing = True     # 文件缺失视为无新事件; 恢复后由调用方记录
+            return []
+
+        if self.missing:
+            self.missing = False    # 文件重新出现, 由调用方记录恢复状态
+
+        identity = (st.st_dev, st.st_ino, st.st_mtime_ns)
+        size = st.st_size
+        if self._identity is None:
+            self.seen = 0                       # 首次读取
+        elif identity[:2] != self._identity[:2]:
+            self.reset_reason = "replaced"      # 文件对象变化 (替换/轮转)
+            self.seen = 0
+        elif size < self.seen:
+            self.reset_reason = "truncated"     # 文件被截断
+            self.seen = 0
+        elif size == self.seen and identity != self._identity:
+            self.reset_reason = "rewritten"     # 同大小内容重写
+            self.seen = 0
+
         try:
             with open(self.path, "r", encoding="utf-8", errors="ignore") as f:
                 f.seek(self.seen)
-                lines = f.readlines()
-                self.seen = f.tell()
+                lines = []
+                while len(lines) < self.max_lines:
+                    line = self._readline_bounded(f)
+                    if line is None:
+                        break
+                    if line is _OVERLONG:
+                        continue
+                    lines.append(line)
+                cookie = f.tell()       # 文本模式下合法的可回溯位置
+                self.seen = cookie
+                if len(lines) >= self.max_lines:
+                    # 因行数上限退出: 探测是否仍有内容, 有则记录截断,
+                    # 并让游标回到探测前的位置, 不吞掉下一行的首字符。
+                    probe = f.read(1)
+                    if probe:
+                        self.truncated = True   # 积压超过单次上限, 剩余下次再读
+                        self.truncated_total += 1
+                        self.seen = cookie
+                self._identity = identity
         except OSError:
-            return []
+            return []                           # 读取失败, 游标不推进
         return lines
 
 
@@ -578,6 +647,13 @@ class Monitor:
         self.source_down = False
         self.event_failures = 0
         self.last_event_fail_log = 0.0
+        self._prev_events_missing = False
+        self._last_event_missing_log = 0.0
+        self._last_event_recovered_log = 0.0
+        self._last_event_reset_log = 0.0
+        self._last_event_limit_log = 0.0
+        self._last_truncated_total = 0
+        self._last_overlong_total = 0
 
     def _update_rates(self, d_total, u_total, now_t):
         """累计差值/实际经过时间 → KB/s; 回退时重新建立基线, 不输出负速率。"""
@@ -603,8 +679,39 @@ class Monitor:
         self.prev_sample_time = now_t
         return up_rate, down_rate
 
+    def _log_event_state(self):
+        """限频记录事件源缺失/恢复/游标重置/读取上限等状态变化。
+
+        每种状态使用独立时间戳限频, 避免缺失与恢复在相邻周期被互相吞掉。
+        """
+        now_t = time.time()
+        if self.events.missing and not self._prev_events_missing:
+            if now_t - self._last_event_missing_log >= EVENT_FAIL_LOG_INTERVAL:
+                self._last_event_missing_log = now_t
+                self.logger.app("EVENT_SOURCE_MISSING source=local_event_file")
+        elif not self.events.missing and self._prev_events_missing:
+            if now_t - self._last_event_recovered_log >= EVENT_FAIL_LOG_INTERVAL:
+                self._last_event_recovered_log = now_t
+                self.logger.app("EVENT_SOURCE_RECOVERED source=local_event_file")
+        self._prev_events_missing = self.events.missing
+
+        if self.events.reset_reason and now_t - self._last_event_reset_log >= EVENT_FAIL_LOG_INTERVAL:
+            self._last_event_reset_log = now_t
+            self.logger.app(f"EVENT_CURSOR_RESET reason={self.events.reset_reason}")
+        if (self.events.truncated_total > self._last_truncated_total
+                and now_t - self._last_event_limit_log >= EVENT_FAIL_LOG_INTERVAL):
+            self._last_event_limit_log = now_t
+            self._last_truncated_total = self.events.truncated_total
+            self.logger.app(f"EVENT_READ_LIMIT kind=lines_per_read total={self.events.truncated_total}")
+        if (self.events.overlong > self._last_overlong_total
+                and now_t - self._last_event_limit_log >= EVENT_FAIL_LOG_INTERVAL):
+            self._last_event_limit_log = now_t
+            self._last_overlong_total = self.events.overlong
+            self.logger.app(f"EVENT_READ_LIMIT kind=overlong_line total={self.events.overlong}")
+
     def _process_events(self, ts):
         lines = self.events.read_new()
+        self._log_event_state()
         rows = []
         for line in lines:
             parsed = parse_event_line(line)
