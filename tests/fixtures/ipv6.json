@@ -1,0 +1,18 @@
+{
+  "downloadTotal": 1000,
+  "uploadTotal": 2000,
+  "connections": [
+    {
+      "id": "c-ipv6",
+      "metadata": {
+        "network": "udp",
+        "destinationIP": "2001:db8::1",
+        "destinationPort": 53,
+        "sourceIP": "::1",
+        "sourcePort": 50002
+      },
+      "upload": 512,
+      "download": 0
+    }
+  ]
+}

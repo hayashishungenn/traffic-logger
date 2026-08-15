@@ -1,0 +1,18 @@
+{
+  "downloadTotal": 1000,
+  "uploadTotal": 2000,
+  "connections": [
+    {
+      "id": "c-ipv4",
+      "metadata": {
+        "network": "tcp",
+        "destinationIP": "203.0.113.10",
+        "destinationPort": "443",
+        "sourceIP": "127.0.0.1",
+        "sourcePort": "50001"
+      },
+      "upload": 1024,
+      "download": 2048
+    }
+  ]
+}

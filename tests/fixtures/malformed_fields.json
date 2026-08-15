@@ -1,0 +1,18 @@
+{
+  "downloadTotal": 1000,
+  "uploadTotal": 2000,
+  "connections": [
+    {
+      "id": "c-malformed",
+      "metadata": {
+        "network": "tcp",
+        "host": "example.com",
+        "destinationIP": "",
+        "remoteDestination": "",
+        "destinationPort": "443"
+      },
+      "upload": 1,
+      "download": 2
+    }
+  ]
+}

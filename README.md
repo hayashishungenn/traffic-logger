@@ -90,7 +90,7 @@ JSONL 明细字段:
 ```
 
 约束:
-- `remote_ip` 只接受通过标准库校验的 IPv4/IPv6 字面量; **域名或无法确认的文本一律不进入明细**, 只计入无效计数。
+- `remote_ip` 只接受通过标准库校验的 IPv4/IPv6 字面量; **域名或无法确认的文本一律不进入明细**, 只计入无效计数。数据源的真实目标 IP 取自 `metadata.destinationIP` 或 `metadata.remoteDestination`, 支持裸 IPv4 (`203.0.113.10`)、裸 IPv6 (`2001:db8::1`) 和带括号 IPv6 (`[2001:db8::1]`), 三种格式都会规范为裸地址写入 `remote_ip` (契约夹具见 `tests/fixtures/`)。
 - `up_bytes` / `down_bytes` 为非负整数; 计数器回退时重新建立基线, 不输出负速率。
 - CSV 固定表头 `timestamp,upload_kbs,download_kbs,active_connections,valid_connections,invalid_connections,total_upload_bytes,total_download_bytes`, 已有文件不重复写表头。
 - **部分数据源异常** (T-02): 聚合总量 `downloadTotal`/`uploadTotal` 非法时, 该周期**仍会写入有效连接 JSONL 明细并处理本地事件**, 但不会写伪造的 CSV 累计值/速率, 快照中的速率显示为 `up_kbs=null down_kbs=null`, 并在 `app.log` 记录 `INVALID_RECORD aggregate ... invalid`; 计数器回退只重建速率基线, 不删除当周期明细。

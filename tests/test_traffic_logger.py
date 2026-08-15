@@ -268,6 +268,16 @@ class IpTests(unittest.TestCase):
         self.assertFalse(tl.is_valid_ip("1.2.3"))
         self.assertFalse(tl.is_valid_ip(203001133))
 
+    def test_normalize_ip_literal(self):
+        self.assertEqual(tl.normalize_ip_literal("203.0.113.10"), "203.0.113.10")
+        self.assertEqual(tl.normalize_ip_literal("2001:db8::1"), "2001:db8::1")
+        self.assertEqual(tl.normalize_ip_literal("[2001:db8::1]"), "2001:db8::1")
+        self.assertIsNone(tl.normalize_ip_literal("example.com"))
+        self.assertIsNone(tl.normalize_ip_literal("[example.com]"))
+        self.assertIsNone(tl.normalize_ip_literal(""))
+        self.assertIsNone(tl.normalize_ip_literal("  "))
+        self.assertIsNone(tl.normalize_ip_literal(None))
+
 
 # ---------------------------------------------------------------- 端口校验
 
@@ -397,6 +407,68 @@ class StandardizeTests(unittest.TestCase):
         row, reason = tl.standardize_connection(["not", "dict"], "t")
         self.assertIsNone(row)
         self.assertEqual(reason, "not_object")
+
+
+# ---------------------------------------------------------------- 数据源契约夹具 (T-08)
+
+class ContractFixtureTests(unittest.TestCase):
+    """对脱敏的本地接口响应夹具做契约测试, 不写入真实日志。
+
+    夹具只含文档地址 (TEST-NET / doc 范围)、测试端口和最小字段, 不含真实
+    密钥、用户地址或业务内容。每种允许的 IP/端口格式都有独立测试。
+    """
+
+    FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+    def _load(self, name):
+        with open(os.path.join(self.FIXTURE_DIR, name), encoding="utf-8") as f:
+            return json.load(f)
+
+    def _standardize_all(self, data):
+        rows = []
+        rejects = {}
+        for rec in data.get("connections", []):
+            row, reason = tl.standardize_connection(rec, "2026-08-15T10:20:30+08:00")
+            if row is None:
+                rejects[reason] = rejects.get(reason, 0) + 1
+            else:
+                rows.append(row)
+        return rows, rejects
+
+    def test_ipv4_contract_fixture(self):
+        rows, rejects = self._standardize_all(self._load("ipv4.json"))
+        self.assertEqual(rejects, {})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["remote_ip"], "203.0.113.10")
+        self.assertEqual(rows[0]["remote_port"], 443)
+        self.assertTrue(tl.is_valid_ip(rows[0]["remote_ip"]))
+
+    def test_ipv6_contract_fixture(self):
+        rows, rejects = self._standardize_all(self._load("ipv6.json"))
+        self.assertEqual(rejects, {})
+        self.assertEqual(rows[0]["remote_ip"], "2001:db8::1")
+        self.assertEqual(rows[0]["remote_port"], 53)
+
+    def test_bracketed_ipv6_contract_fixture(self):
+        # remoteDestination 使用带括号 IPv6: 规范为裸地址
+        rows, rejects = self._standardize_all(self._load("bracketed_ipv6.json"))
+        self.assertEqual(rejects, {})
+        self.assertEqual(rows[0]["remote_ip"], "2001:db8::2")
+        self.assertEqual(rows[0]["remote_port"], 443)
+
+    def test_missing_fields_contract_fixture(self):
+        # 缺 sourceIP/sourcePort: local 端点用 null, 不猜测
+        rows, rejects = self._standardize_all(self._load("missing_fields.json"))
+        self.assertEqual(rejects, {})
+        self.assertIsNone(rows[0]["local_ip"])
+        self.assertIsNone(rows[0]["local_port"])
+        self.assertEqual(rows[0]["remote_ip"], "198.51.100.5")
+
+    def test_malformed_fields_contract_fixture(self):
+        # 域名/空 IP 不兜底: 计入 invalid_remote_ip, 不进入明细
+        rows, rejects = self._standardize_all(self._load("malformed_fields.json"))
+        self.assertEqual(len(rows), 0)
+        self.assertEqual(rejects.get("invalid_remote_ip"), 1)
 
 
 # ---------------------------------------------------------------- 事件解析

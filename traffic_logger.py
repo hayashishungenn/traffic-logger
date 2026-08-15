@@ -174,6 +174,22 @@ def is_valid_ip(value):
         return False
 
 
+def normalize_ip_literal(value):
+    """把数据源可能出现的 IP 字面量规范为裸 IPv4/IPv6。
+
+    接受裸地址 (203.0.113.10 / 2001:db8::1) 或带括号 IPv6 ([2001:db8::1]);
+    无法确认时返回 None, 绝不把域名或任意文本猜测成 IP。
+    """
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    if v.startswith("[") and v.endswith("]"):
+        v = v[1:-1]
+    if is_valid_ip(v):
+        return v
+    return None
+
+
 def parse_port(value):
     """把 1-65535 的整数(或纯数字字符串)安全转换为 int; 其余返回 None。"""
     if isinstance(value, bool):
@@ -368,8 +384,9 @@ def standardize_connection(rec, ts):
     remote_ip = None
     for key in ("destinationIP", "remoteDestination"):
         v = meta.get(key)
-        if isinstance(v, str) and v.strip() and is_valid_ip(v):
-            remote_ip = v.strip()
+        ip = normalize_ip_literal(v)
+        if ip is not None:
+            remote_ip = ip
             break
     if remote_ip is None:
         return None, "invalid_remote_ip"

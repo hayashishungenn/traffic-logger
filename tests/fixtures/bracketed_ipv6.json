@@ -1,0 +1,18 @@
+{
+  "downloadTotal": 1000,
+  "uploadTotal": 2000,
+  "connections": [
+    {
+      "id": "c-bracket",
+      "metadata": {
+        "network": "tcp",
+        "remoteDestination": "[2001:db8::2]",
+        "destinationPort": "443",
+        "sourceIP": "::1",
+        "sourcePort": 50003
+      },
+      "upload": 10,
+      "download": 20
+    }
+  ]
+}

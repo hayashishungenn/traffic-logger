@@ -1,0 +1,16 @@
+{
+  "downloadTotal": 1000,
+  "uploadTotal": 2000,
+  "connections": [
+    {
+      "id": "c-missing",
+      "metadata": {
+        "network": "tcp",
+        "destinationIP": "198.51.100.5",
+        "destinationPort": "8080"
+      },
+      "upload": 5,
+      "download": 6
+    }
+  ]
+}
